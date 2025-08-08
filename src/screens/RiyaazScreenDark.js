@@ -370,27 +370,97 @@ const RiyaazScreen = () => {
     return 'Beginner';
   };
 
+  // Helper function to get the base swara name (without octave indicators)
+  const getBaseSwaraName = (swaraName) => {
+    if (!swaraName) return '';
+    // Remove octave indicators like ', ", ', etc.
+    return swaraName.replace(/['"`´]/g, '').trim();
+  };
+
+  // Helper function to check if two swaras are the same base note (regardless of octave)
+  const isSameSwaraBase = (swara1, swara2) => {
+    return getBaseSwaraName(swara1) === getBaseSwaraName(swara2);
+  };
+
   const detectUserSwara = (frequency) => {
     if (!frequency || !saFrequency) {
       setUserCurrentSwara(null);
       return;
     }
 
+    // Check all swaras including octave variants
     const swaras = ['S', 'r', 'R', 'g', 'G', 'M', 'm', 'P', 'd', 'D', 'n', 'N'];
     let closestSwara = null;
     let minDeviation = Infinity;
+    let debugInfo = [];
 
+    // Check each swara in current octave and adjacent octaves
     swaras.forEach(swara => {
+      // Current octave
       const swaraFreq = getSwaraFrequency(swara);
       const deviation = Math.abs(frequency - swaraFreq);
       
-      if (deviation < minDeviation && deviation < 75) { // Within 75 cents
+      debugInfo.push({
+        swara: swara,
+        swaraFreq: Math.round(swaraFreq),
+        deviation: Math.round(deviation),
+        octave: 'current'
+      });
+      
+      if (deviation < minDeviation) {
         minDeviation = deviation;
         closestSwara = swara;
       }
+
+      // Check higher octave (double frequency)
+      const higherOctaveFreq = swaraFreq * 2;
+      const higherDeviation = Math.abs(frequency - higherOctaveFreq);
+      
+      debugInfo.push({
+        swara: `${swara}'`,
+        swaraFreq: Math.round(higherOctaveFreq),
+        deviation: Math.round(higherDeviation),
+        octave: 'higher'
+      });
+      
+      if (higherDeviation < minDeviation) {
+        minDeviation = higherDeviation;
+        closestSwara = swara; // Keep base swara name for consistency
+      }
+
+      // Check lower octave (half frequency)
+      const lowerOctaveFreq = swaraFreq / 2;
+      const lowerDeviation = Math.abs(frequency - lowerOctaveFreq);
+      
+      debugInfo.push({
+        swara: `'${swara}`,
+        swaraFreq: Math.round(lowerOctaveFreq),
+        deviation: Math.round(lowerDeviation),
+        octave: 'lower'
+      });
+      
+      if (lowerDeviation < minDeviation) {
+        minDeviation = lowerDeviation;
+        closestSwara = swara; // Keep base swara name for consistency
+      }
     });
 
-    setUserCurrentSwara(closestSwara);
+    // Accept if within 150 cents (more generous)
+    const finalMatch = minDeviation < 150 ? closestSwara : null;
+
+    // Debug logging - show top 5 closest matches
+    if (__DEV__) {
+      const sortedDebug = debugInfo.sort((a, b) => a.deviation - b.deviation).slice(0, 5);
+      console.log('detectUserSwara Debug:', {
+        inputFreq: Math.round(frequency),
+        saFreq: Math.round(saFrequency),
+        finalMatch,
+        minDeviation: Math.round(minDeviation),
+        topMatches: sortedDebug
+      });
+    }
+
+    setUserCurrentSwara(finalMatch);
   };
 
   const completeSwaraPractice = () => {
@@ -1686,6 +1756,50 @@ const RiyaazScreen = () => {
     
     return (
       <View style={styles.gameContainer}>
+        {/* Live Pitch Display */}
+        <View style={styles.livePitchDisplay}>
+          <View style={styles.pitchInfo}>
+            <Text style={styles.pitchLabel}>Your Pitch:</Text>
+            <Text style={styles.pitchValue}>
+              {currentPitch?.frequency ? `${Math.round(currentPitch.frequency)} Hz` : '--'}
+            </Text>
+            <Text style={styles.detectedSwara}>
+              {userCurrentSwara ? `Singing: ${userCurrentSwara}` : 'Not detecting'}
+            </Text>
+          </View>
+          <View style={styles.confidenceBar}>
+            <Text style={styles.confidenceLabel}>Confidence:</Text>
+            <View style={styles.confidenceBarBackground}>
+              <View 
+                style={[
+                  styles.confidenceBarFill,
+                  { 
+                    width: `${(currentPitch?.confidence || 0) * 100}%`,
+                    backgroundColor: (currentPitch?.confidence || 0) > 0.7 ? '#4CAF50' : 
+                                   (currentPitch?.confidence || 0) > 0.4 ? '#FF9800' : '#F44336'
+                  }
+                ]}
+              />
+            </View>
+            <Text style={styles.confidenceValue}>
+              {Math.round((currentPitch?.confidence || 0) * 100)}%
+            </Text>
+          </View>
+          {/* Debug info for development */}
+          {__DEV__ && saFrequency && currentPitch?.frequency && (
+            <View style={styles.debugPitchInfo}>
+              <Text style={styles.debugText}>
+                Sa: {Math.round(saFrequency)}Hz • 
+                Ratio: {(currentPitch.frequency / saFrequency).toFixed(2)} • 
+                Cents: {Math.round(1200 * Math.log2(currentPitch.frequency / saFrequency))}
+              </Text>
+              <Text style={styles.debugText}>
+                Target: {swaraSequence[currentSwaraIndex]} ({Math.round(getSwaraFrequency(swaraSequence[currentSwaraIndex]))}Hz)
+              </Text>
+            </View>
+          )}
+        </View>
+
         {/* Combined Training Analytics Widget */}
         <View style={styles.trainingAnalyticsWidget}>
           <View style={styles.widgetHeader}>
@@ -1706,9 +1820,9 @@ const RiyaazScreen = () => {
               const x = radius * Math.cos((angle * Math.PI) / 180);
               const y = radius * Math.sin((angle * Math.PI) / 180);
               
-              const isTarget = swara === currentSwara;
-              const isUserSinging = swara === userCurrentSwara;
-              const isInSequence = swaraSequence.includes(swara);
+              const isTarget = isSameSwaraBase(swara, currentSwara);
+              const isUserSinging = isSameSwaraBase(swara, userCurrentSwara);
+              const isInSequence = swaraSequence.some(seqSwara => isSameSwaraBase(swara, seqSwara));
               
               return (
                 <TouchableOpacity
@@ -4074,6 +4188,81 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     marginTop: 0,
     paddingTop: 0,
+  },
+
+  // Live Pitch Display
+  livePitchDisplay: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  pitchInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  pitchLabel: {
+    fontSize: 14,
+    color: '#ccc',
+    fontWeight: '600',
+  },
+  pitchValue: {
+    fontSize: 18,
+    color: '#4CAF50',
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+  },
+  detectedSwara: {
+    fontSize: 14,
+    color: '#FF6B35',
+    fontWeight: '600',
+  },
+  confidenceBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  confidenceLabel: {
+    fontSize: 12,
+    color: '#aaa',
+    fontWeight: '600',
+    width: 70,
+  },
+  confidenceBarBackground: {
+    flex: 1,
+    height: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  confidenceBarFill: {
+    height: '100%',
+    borderRadius: 3,
+    transition: 'width 0.2s ease',
+  },
+  confidenceValue: {
+    fontSize: 12,
+    color: '#ccc',
+    fontFamily: 'monospace',
+    width: 35,
+    textAlign: 'right',
+  },
+  debugPitchInfo: {
+    marginTop: 8,
+    padding: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    borderRadius: 4,
+  },
+  debugText: {
+    fontSize: 10,
+    color: '#aaa',
+    fontFamily: 'monospace',
+    lineHeight: 12,
   },
   
   // Simple Header
