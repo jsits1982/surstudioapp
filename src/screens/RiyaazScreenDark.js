@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import useAudioRecorder from '../hooks/useAudioRecorder';
-import { Audio } from 'expo-av';
 import { playSwaraTone, stopSwaraTone, setSwaraVolume } from '../utils/TanpuraAudio';
 import raagNames from '../data/raagNames.json';
 
@@ -22,14 +21,13 @@ const { width, height } = Dimensions.get('window');
 const RiyaazScreen = () => {
   // Game state
   const [gameState, setGameState] = useState('setup'); // 'setup', 'saDetection', 'playing', 'paused', 'completed'
-  const [userLevel, setUserLevel] = useState(1);
-  const [userXP, setUserXP] = useState(0);
-  const [userCoins, setUserCoins] = useState(50);
-  const [streak, setStreak] = useState(0);
-  const [currentScore, setCurrentScore] = useState(0);
-  const [difficulty, setDifficulty] = useState('easy'); // 'easy', 'medium', 'hard'
-  const [selectedDifficulty, setSelectedDifficulty] = useState('easy'); // For UI selection
+  const [practiceMode, setPracticeMode] = useState(null); // 'raag' or 'freeform'
   const [showHoldTimeControls, setShowHoldTimeControls] = useState(false); // For collapsible hold time
+  
+  // Premium features state
+  const [isPremium, setIsPremium] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   
   // Raag practice specific state
   const [selectedRaag, setSelectedRaag] = useState(null);
@@ -54,8 +52,8 @@ const RiyaazScreen = () => {
   
   // Game mechanics
   const [currentSwaraIndex, setCurrentSwaraIndex] = useState(0);
-  const [swaraSequence, setSwaraSequence] = useState(['Sa']); // Progressive sequence
-  const [holdTime, setHoldTime] = useState(2); // Reduced to 2 seconds (was 3)
+  const [swaraSequence, setSwaraSequence] = useState(['S']); // Single swara for free practice
+  const [holdTime, setHoldTime] = useState(3); // Hold time in seconds
   const [currentHoldTime, setCurrentHoldTime] = useState(0);
   const [isHoldingCorrectly, setIsHoldingCorrectly] = useState(false);
   const [gameTimer, setGameTimer] = useState(0);
@@ -67,7 +65,27 @@ const RiyaazScreen = () => {
   // Visual feedback
   const [pitchAccuracy, setPitchAccuracy] = useState(0);
   const [visualFeedback, setVisualFeedback] = useState('');
-  const [strugglingTimer, setStrugglingTimer] = useState(0);
+  
+  // Pitch stability tracking
+  const [pitchHistory, setPitchHistory] = useState([]);
+  const [pitchStability, setPitchStability] = useState(0);
+  const [stabilityFeedback, setStabilityFeedback] = useState('');
+  
+  // Tolerance adjustment state
+  const [tolerance, setTolerance] = useState(50); // Default 50 cents
+  const [toleranceLevel, setToleranceLevel] = useState('Medium');
+  
+  // Current singing swara detection
+  const [userCurrentSwara, setUserCurrentSwara] = useState(null);
+  
+  // Free practice mode state
+  const [selectedFreeSwara, setSelectedFreeSwara] = useState(null); // Single swara for free practice
+  
+  // User progress tracking
+  const [userLevel, setUserLevel] = useState(1);
+  const [userXP, setUserXP] = useState(0);
+  
+
   
   // Animation values
   const scaleValue = new Animated.Value(1);
@@ -87,32 +105,30 @@ const RiyaazScreen = () => {
     hasPermission 
   } = useAudioRecorder();
   
-  // Difficulty settings
-  const difficultySettings = {
-    easy: { 
-      name: 'Easy', 
-      deviation: 75, 
-      description: '±75 cents',
-      color: '#4CAF50',
-      icon: '🟢'
-    },
-    medium: { 
-      name: 'Medium', 
-      deviation: 50, 
-      description: '±50 cents',
-      color: '#FF9800',
-      icon: '🟡'
-    },
-    hard: { 
-      name: 'Hard', 
-      deviation: 25, 
-      description: '±25 cents',
-      color: '#F44336',
-      icon: '🔴'
+  // Premium features
+  const loadPremiumStatus = async () => {
+    try {
+      const premium = await AsyncStorage.getItem('isPremium');
+      if (premium) {
+        setIsPremium(JSON.parse(premium));
+      }
+    } catch (error) {
+      console.log('Error loading premium status:', error);
     }
   };
-  
-  // Remove audio hint system - not needed for professional UI
+
+  const upgradeToPremium = async () => {
+    // This would integrate with in-app purchases
+    try {
+      // Simulate purchase for now
+      setIsPremium(true);
+      await AsyncStorage.setItem('isPremium', JSON.stringify(true));
+      setShowUpgradeModal(false);
+      Alert.alert('Success!', 'Welcome to Sur Studio Premium! All features unlocked.');
+    } catch (error) {
+      Alert.alert('Error', 'Purchase failed. Please try again.');
+    }
+  };
   
   // Game timer
   const gameTimerRef = useRef(null);
@@ -122,6 +138,7 @@ const RiyaazScreen = () => {
   useEffect(() => {
     loadUserProgress();
     loadCompletedRaags();
+    loadPremiumStatus();
   }, []);
 
   // Search functionality for raags
@@ -170,13 +187,25 @@ const RiyaazScreen = () => {
     if (gameState === 'playing' && currentPitch?.frequency && saFrequency) {
       const targetFrequency = getSwaraFrequency(swaraSequence[currentSwaraIndex]);
       const deviation = getPitchDeviation(currentPitch.frequency, targetFrequency);
-      const accuracy = Math.max(0, 100 - Math.abs(deviation || 100));
+      // Calculate accuracy based on dynamic tolerance
+      const accuracy = Math.max(0, 100 - (Math.abs(deviation || 100) * 100 / tolerance));
       
       setPitchAccuracy(accuracy);
       
-      // Use difficulty-based pitch matching
-      const currentDifficultySettings = difficultySettings[difficulty];
-      const isCorrect = Math.abs(deviation || 100) <= currentDifficultySettings.deviation;
+      // Detect which swara user is currently singing
+      detectUserSwara(currentPitch.frequency);
+      
+      // Update pitch history for stability calculation
+      setPitchHistory(prev => {
+        const newHistory = [...prev, currentPitch.frequency].slice(-20); // Keep last 20 readings
+        const stability = calculatePitchStability(newHistory);
+        setPitchStability(stability);
+        setStabilityFeedback(getStabilityFeedback(stability));
+        return newHistory;
+      });
+      
+      // Use tolerance-based pitch matching
+      const isCorrect = Math.abs(deviation || 100) <= tolerance;
       setIsHoldingCorrectly(isCorrect);
       
       if (isCorrect) {
@@ -192,7 +221,6 @@ const RiyaazScreen = () => {
         if (!holdTimerRef.current) {
           startHoldTimer();
         }
-        setStrugglingTimer(0); // Reset struggling timer when pitch is correct
       } else {
         setVisualFeedback('🎵 Find the note...');
         // Reset hold timer
@@ -203,7 +231,7 @@ const RiyaazScreen = () => {
         }
       }
     }
-  }, [currentPitch, gameState, currentSwaraIndex, saFrequency, difficulty]);
+  }, [currentPitch, gameState, currentSwaraIndex, saFrequency, tolerance]);
 
   // Play swara tone when starting a new swara
   useEffect(() => {
@@ -221,15 +249,11 @@ const RiyaazScreen = () => {
     try {
       const savedLevel = await AsyncStorage.getItem('userLevel');
       const savedXP = await AsyncStorage.getItem('userXP');
-      const savedCoins = await AsyncStorage.getItem('userCoins');
-      const savedStreak = await AsyncStorage.getItem('streak');
       const savedSa = await AsyncStorage.getItem('userSaFrequency');
       const savedPianoKey = await AsyncStorage.getItem('selectedPianoKey');
       
       if (savedLevel) setUserLevel(parseInt(savedLevel));
       if (savedXP) setUserXP(parseInt(savedXP));
-      if (savedCoins) setUserCoins(parseInt(savedCoins));
-      if (savedStreak) setStreak(parseInt(savedStreak));
       
       if (savedPianoKey) {
         try {
@@ -259,8 +283,6 @@ const RiyaazScreen = () => {
     try {
       await AsyncStorage.setItem('userLevel', userLevel.toString());
       await AsyncStorage.setItem('userXP', userXP.toString());
-      await AsyncStorage.setItem('userCoins', userCoins.toString());
-      await AsyncStorage.setItem('streak', streak.toString());
       if (saFrequency) {
         await AsyncStorage.setItem('userSaFrequency', saFrequency.toString());
       }
@@ -319,6 +341,87 @@ const RiyaazScreen = () => {
   const getPitchDeviation = (currentFreq, targetFreq) => {
     if (!currentFreq || !targetFreq) return null;
     return Math.round(1200 * Math.log2(currentFreq / targetFreq));
+  };
+
+  // Calculate pitch stability from recent pitch history
+  const calculatePitchStability = (pitches) => {
+    if (pitches.length < 5) return 0;
+    
+    // Get last 10 pitch values for stability calculation
+    const recentPitches = pitches.slice(-10);
+    const average = recentPitches.reduce((sum, p) => sum + p, 0) / recentPitches.length;
+    
+    // Calculate variance (how much pitches deviate from average)
+    const variance = recentPitches.reduce((sum, p) => sum + Math.pow(p - average, 2), 0) / recentPitches.length;
+    const standardDeviation = Math.sqrt(variance);
+    
+    // Convert to stability score (lower deviation = higher stability)
+    // 10 cents deviation = 90% stability, 50 cents = 0% stability
+    const stabilityScore = Math.max(0, 100 - (standardDeviation * 2));
+    
+    return Math.round(stabilityScore);
+  };
+
+  const updateToleranceLevel = (cents) => {
+    if (cents <= 20) return 'Expert';
+    if (cents <= 35) return 'Strict';  
+    if (cents <= 50) return 'Medium';
+    if (cents <= 75) return 'Easy';
+    return 'Beginner';
+  };
+
+  const detectUserSwara = (frequency) => {
+    if (!frequency || !saFrequency) {
+      setUserCurrentSwara(null);
+      return;
+    }
+
+    const swaras = ['S', 'r', 'R', 'g', 'G', 'M', 'm', 'P', 'd', 'D', 'n', 'N'];
+    let closestSwara = null;
+    let minDeviation = Infinity;
+
+    swaras.forEach(swara => {
+      const swaraFreq = getSwaraFrequency(swara);
+      const deviation = Math.abs(frequency - swaraFreq);
+      
+      if (deviation < minDeviation && deviation < 75) { // Within 75 cents
+        minDeviation = deviation;
+        closestSwara = swara;
+      }
+    });
+
+    setUserCurrentSwara(closestSwara);
+  };
+
+  const completeSwaraPractice = () => {
+    // For single swara practice, we complete the current swara and can start again
+    if (practiceMode === 'freeform') {
+      // Just reset the hold timer to practice again
+      setCurrentHoldTime(0);
+      progressValue.setValue(0);
+      return;
+    }
+    
+    // For raag practice, advance to next swara or complete sequence
+    if (currentSwaraIndex < swaraSequence.length - 1) {
+      const nextIndex = currentSwaraIndex + 1;
+      setCurrentSwaraIndex(nextIndex);
+      setCurrentHoldTime(0);
+      progressValue.setValue(0);
+    } else {
+      // Sequence completed
+      completeLevel();
+    }
+  };
+
+
+
+  const getStabilityFeedback = (stability) => {
+    if (stability >= 90) return '🎯 Rock Steady!';
+    if (stability >= 70) return '🎵 Very Stable';
+    if (stability >= 50) return '📈 Getting Steady';
+    if (stability >= 30) return '🌊 Wavering';
+    return '⚡ Very Shaky';
   };
 
   // Raag management functions
@@ -394,7 +497,6 @@ const RiyaazScreen = () => {
     
     // Reset game state completely for new sequence
     setCurrentHoldTime(0);
-    setCurrentScore(0);
     progressValue.setValue(0);
     setPitchAccuracy(0);
     setIsHoldingCorrectly(false);
@@ -509,10 +611,6 @@ const RiyaazScreen = () => {
       holdTimerRef.current = null;
     }
     
-    // Add score based on accuracy
-    const scoreGain = Math.round(pitchAccuracy * 10);
-    setCurrentScore(prev => prev + scoreGain);
-    
     // Success animation
     Animated.sequence([
       Animated.timing(scaleValue, {
@@ -527,16 +625,9 @@ const RiyaazScreen = () => {
       }),
     ]).start();
     
-    // Move to next swara
+    // Move to next swara or handle completion
     setTimeout(() => {
-      if (currentSwaraIndex < swaraSequence.length - 1) {
-        setCurrentSwaraIndex(prev => prev + 1);
-        setCurrentHoldTime(0);
-        progressValue.setValue(0);
-      } else {
-        // Level completed
-        completeLevel();
-      }
+      completeSwaraPractice();
     }, 500);
   };
 
@@ -547,25 +638,16 @@ const RiyaazScreen = () => {
       return;
     }
     
-    // Standard completion logic for non-raag mode
+    // For single swara practice, just complete and allow restart
     setGameState('completed');
     
-    // Award XP and coins
-    const xpGain = Math.round(currentScore / 10);
-    const coinGain = Math.round(currentScore / 50);
-    
+    // Award XP
+    const xpGain = 50; // Fixed XP gain
     setUserXP(prev => prev + xpGain);
-    setUserCoins(prev => prev + coinGain);
     
     // Check for level up
     if (userXP + xpGain >= userLevel * 100) {
       setUserLevel(prev => prev + 1);
-    }
-    
-    // Expand sequence for next level
-    const allSwaras = ['S', 'R', 'G', 'M', 'P', 'D', 'N'];
-    if (swaraSequence.length < allSwaras.length) {
-      setSwaraSequence(allSwaras.slice(0, swaraSequence.length + 1));
     }
     
     saveUserProgress();
@@ -707,9 +789,9 @@ const RiyaazScreen = () => {
     { name: 'B5', frequency: 987.77, isWhite: true },
   ];
 
-  const startGame = async (gameDifficulty = null) => {
+  const startGame = async () => {
     if (!saFrequency) {
-      Alert.alert('Set Sa First', 'Please detect your Sa frequency before starting the game.');
+      Alert.alert('Set Sa First', 'Please detect your Sa frequency before starting the practice.');
       return;
     }
     
@@ -717,14 +799,14 @@ const RiyaazScreen = () => {
       await requestPermissions();
     }
     
-    // Use the passed difficulty, or the selected difficulty from UI, or default to 'easy'
-    const gameplayDifficulty = gameDifficulty || selectedDifficulty || 'easy';
+    // For freeform mode, set up single swara sequence
+    if (practiceMode === 'freeform' && selectedFreeSwara) {
+      setSwaraSequence([selectedFreeSwara]);
+    }
     
-    // Set difficulty and reset game state
-    setDifficulty(gameplayDifficulty);
+    // Reset game state
     setCurrentSwaraIndex(0);
     setCurrentHoldTime(0);
-    setCurrentScore(0);
     setGameTimer(0);
     progressValue.setValue(0);
     
@@ -752,10 +834,6 @@ const RiyaazScreen = () => {
     }
   };
 
-  const selectDifficulty = (difficultyKey) => {
-    setSelectedDifficulty(difficultyKey);
-  };
-
   const adjustHoldTime = (change) => {
     setHoldTime(prev => Math.max(1, Math.min(5, prev + change))); // Between 1-5 seconds
   };
@@ -764,6 +842,14 @@ const RiyaazScreen = () => {
     const newVolume = Math.max(0, Math.min(1, swaraVolume + change));
     setSwaraVolumeState(newVolume);
     setSwaraVolume(newVolume); // Update the audio engine volume
+  };
+
+  const adjustTolerance = (direction) => {
+    if (direction === 'easier') {
+      setTolerance(prev => Math.min(100, prev + 10));
+    } else if (direction === 'harder') {
+      setTolerance(prev => Math.max(10, prev - 10));
+    }
   };
 
   const pauseGame = () => {
@@ -784,7 +870,6 @@ const RiyaazScreen = () => {
     setGameState('setup');
     setCurrentSwaraIndex(0);
     setCurrentHoldTime(0);
-    setCurrentScore(0);
     setGameTimer(0);
     setSwaraSequence(['Sa']);
     progressValue.setValue(0);
@@ -800,11 +885,20 @@ const RiyaazScreen = () => {
   const renderHeader = () => (
     <View style={styles.header}>
       <View style={styles.headerLeft}>
-        <Text style={styles.appTitle}>🎵 Swara Sadhana</Text>
+        <Text style={styles.appTitle}>Sur Studio</Text>
         <Text style={styles.appSubtitle}>Master Your Voice</Text>
       </View>
       
       <View style={styles.headerRight}>
+        {!isPremium && (
+          <TouchableOpacity 
+            style={styles.upgradeButton}
+            onPress={() => setShowUpgradeModal(true)}
+          >
+            <Text style={styles.upgradeButtonText}>✨ Premium</Text>
+          </TouchableOpacity>
+        )}
+        
         <View style={styles.userStats}>
           <View style={styles.levelBadge}>
             <Text style={styles.levelText}>L{userLevel}</Text>
@@ -824,7 +918,7 @@ const RiyaazScreen = () => {
         
         <TouchableOpacity 
           style={styles.settingsButton}
-          onPress={() => Alert.alert('Settings', 'Settings panel coming soon!')}
+          onPress={() => setShowSettingsModal(true)}
         >
           <Text style={styles.settingsIcon}>⚙️</Text>
         </TouchableOpacity>
@@ -1063,263 +1157,245 @@ const RiyaazScreen = () => {
     </View>
   );
 
-  const renderSetupScreen = () => (
-    <View style={styles.setupContainer}>
-      <Text style={styles.setupTitle}>🏆 Swara Sadhana</Text>
-      <Text style={styles.gameSubtitle}>
-        Hold each swara for {holdTime} seconds to progress
-      </Text>
-      
-      {saFrequency ? (
-        <View style={styles.saDisplayContainer}>
-          <Text style={styles.saDisplayLabel}>Your Sa Frequency:</Text>
-          <Text style={styles.saDisplayValue}>{Math.round(saFrequency)} Hz</Text>
-          {selectedPianoKey && (
-            <Text style={styles.pianoKeyLabel}>
-              Piano Key: {selectedPianoKey.name} • {selectedPianoKey.octaveName}
-            </Text>
-          )}
+  const renderSetupScreen = () => {
+    // If no practice mode selected, show mode selection
+    if (!practiceMode) {
+      return (
+        <View style={styles.setupContainer}>
+          <Text style={styles.setupTitle}>Sur Studio</Text>
+          <Text style={styles.setupSubtitle}>Choose Your Practice Mode</Text>
           
-          <TouchableOpacity
-            style={styles.changeSaSetupButton}
-            onPress={() => setGameState('saDetection')}
-          >
-            <Text style={styles.changeSaText}>🔄 Change Sa</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <View style={styles.noSaContainer}>
-          <Text style={styles.noSaText}>⚠️ Sa not set</Text>
-          <TouchableOpacity
-            style={styles.setSaButton}
-            onPress={() => setGameState('saDetection')}
-          >
-            <Text style={styles.buttonText}>🎯 Set Sa First</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Raag Selector */}
-      <View style={styles.raagSelectorContainer}>
-        <Text style={styles.raagSelectorTitle}>🎵 Select Raag</Text>
-        <TouchableOpacity
-          style={styles.raagSelectorButton}
-          onPress={() => setShowRaagSelector(true)}
-        >
-          <Text style={styles.raagSelectorText}>
-            {isLoadingRaag 
-              ? '⏳ Loading Raag...' 
-              : selectedRaag 
-                ? `📜 ${selectedRaag}` 
-                : '📜 Choose a Raag to Practice'}
-          </Text>
-          {selectedRaag && !isLoadingRaag && (
-            <View style={styles.raagProgressContainer}>
-              <Text style={styles.raagProgressText}>
-                {currentRaagSequence.toUpperCase()} • 
-                Progress: {Object.values(raagProgress).filter(Boolean).length}/3
-              </Text>
-              {completedRaags.includes(selectedRaag) && (
-                <Text style={styles.completedBadge}>✅ MASTERED</Text>
-              )}
-            </View>
-          )}
-        </TouchableOpacity>
-        {selectedRaag && (
-          <TouchableOpacity
-            style={styles.clearRaagButton}
-            onPress={() => {
-              setSelectedRaag(null);
-              setSwaraSequence(['S']);
-              setCurrentSwaraIndex(0);
-            }}
-          >
-            <Text style={styles.clearRaagText}>❌ Clear Selection</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      <View style={styles.gameStats}>
-        <View style={styles.statItem}>
-          <Text style={styles.statIcon}>🎯</Text>
-          <Text style={styles.statValue}>{swaraSequence.length}</Text>
-          <Text style={styles.statLabel}>Swaras</Text>
-        </View>
-        <View style={styles.statItem}>
-          <Text style={styles.statIcon}>⏱️</Text>
-          <Text style={styles.statValue}>{holdTime}s</Text>
-          <Text style={styles.statLabel}>Hold Time</Text>
-        </View>
-        <View style={styles.statItem}>
-          <Text style={styles.statIcon}>🏆</Text>
-          <Text style={styles.statValue}>{userLevel}</Text>
-          <Text style={styles.statLabel}>Level</Text>
-        </View>
-      </View>
-      
-      <TouchableOpacity
-        style={[
-          styles.startSadhanaButton,
-          { 
-            backgroundColor: difficultySettings[selectedDifficulty].color,
-            opacity: (saFrequency && selectedRaag && !isLoadingRaag) ? 1 : 0.5 
-          }
-        ]}
-        onPress={() => startGame(selectedDifficulty)}
-        disabled={!saFrequency || !selectedRaag || isLoadingRaag}
-      >
-        <Text style={styles.startSadhanaText}>
-          {!selectedRaag ? 'Select a Raag First' : 
-           isLoadingRaag ? 'Loading Raag...' : 'Start Sadhana'}
-        </Text>
-        <Text style={styles.startSadhanaSubtext}>
-          {!selectedRaag 
-            ? 'Choose a raag to begin practice' 
-            : isLoadingRaag
-              ? 'Please wait while raag loads'
-              : `${difficultySettings[selectedDifficulty].name} Mode`}
-        </Text>
-      </TouchableOpacity>
-      
-      <Text style={styles.difficultyTitle}>🎮 Choose Difficulty Level</Text>
-      
-      <View style={styles.difficultyContainer}>
-        <View style={styles.difficultyButtons}>
-          {Object.entries(difficultySettings).map(([key, settings]) => (
+          <View style={styles.practiceModesContainer}>
+            {/* Free-form Practice */}
             <TouchableOpacity
-              key={key}
-              style={[
-                styles.smallDifficultyButton,
-                { 
-                  borderColor: settings.color,
-                  backgroundColor: selectedDifficulty === key ? `${settings.color}25` : `${settings.color}10`,
-                  opacity: (saFrequency && selectedRaag && !isLoadingRaag) ? 1 : 0.5 
-                }
-              ]}
-              onPress={() => selectDifficulty(key)}
-              disabled={!saFrequency || !selectedRaag || isLoadingRaag}
+              style={styles.practiceModeCard}
+              onPress={() => setPracticeMode('freeform')}
             >
-              <Text style={styles.smallDifficultyIcon}>{settings.icon}</Text>
-              <Text style={[styles.smallDifficultyName, { color: settings.color }]}>
-                {settings.name}
-              </Text>
-              <Text style={styles.smallDifficultyDescription}>
-                {settings.description}
+              <Text style={styles.practiceModeIcon}>�</Text>
+              <Text style={styles.practiceModeTitle}>Free Practice</Text>
+              <Text style={styles.practiceModeDescription}>
+                Practice individual swaras at your own pace
               </Text>
             </TouchableOpacity>
-          ))}
-        </View>
-      </View>
-      
-      {/* Hold Time Adjustment */}
-      <View style={styles.holdTimeContainer}>
-        <TouchableOpacity 
-          style={styles.holdTimeHeader}
-          onPress={() => setShowHoldTimeControls(!showHoldTimeControls)}
-        >
-          <View style={styles.holdTimeHeaderContent}>
-            <Text style={styles.holdTimeLabel}>Hold Time: {holdTime}s</Text>
-            <Text style={styles.holdTimeToggle}>
-              {showHoldTimeControls ? '▲' : '▼'}
-            </Text>
-          </View>
-          <Text style={styles.holdTimeHeaderDescription}>
-            Tap to adjust timing (currently {holdTime} seconds)
-          </Text>
-        </TouchableOpacity>
-        
-        {showHoldTimeControls && (
-          <View style={styles.holdTimeControlsContainer}>
-            <View style={styles.holdTimeControls}>
-              <TouchableOpacity 
-                style={[styles.holdTimeButton, { opacity: holdTime <= 1 ? 0.5 : 1 }]}
-                onPress={() => adjustHoldTime(-0.5)}
-                disabled={holdTime <= 1}
-              >
-                <Text style={styles.holdTimeButtonText}>-</Text>
-              </TouchableOpacity>
-              
-              <View style={styles.holdTimeDisplay}>
-                <Text style={styles.holdTimeValue}>{holdTime}s</Text>
-              </View>
-              
-              <TouchableOpacity 
-                style={[styles.holdTimeButton, { opacity: holdTime >= 5 ? 0.5 : 1 }]}
-                onPress={() => adjustHoldTime(0.5)}
-                disabled={holdTime >= 5}
-              >
-                <Text style={styles.holdTimeButtonText}>+</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.holdTimeDescription}>
-              Time required to hold each swara (1-5 seconds)
-            </Text>
-          </View>
-        )}
-      </View>
-      
-      {/* Volume Control */}
-      <View style={styles.holdTimeContainer}>
-        <TouchableOpacity 
-          style={styles.holdTimeHeader}
-          onPress={() => setShowVolumeControls(!showVolumeControls)}
-        >
-          <View style={styles.holdTimeHeaderContent}>
-            <Text style={styles.holdTimeLabel}>Swara Volume: {Math.round(swaraVolume * 100)}%</Text>
-            <Text style={styles.holdTimeToggle}>
-              {showVolumeControls ? '▲' : '▼'}
-            </Text>
-          </View>
-          <Text style={styles.holdTimeHeaderDescription}>
-            Tap to adjust swara tone volume (currently {Math.round(swaraVolume * 100)}%)
-          </Text>
-        </TouchableOpacity>
-        
-        {showVolumeControls && (
-          <View style={styles.holdTimeControlsContainer}>
-            <View style={styles.holdTimeControls}>
-              <TouchableOpacity 
-                style={[styles.holdTimeButton, { opacity: swaraVolume <= 0 ? 0.5 : 1 }]}
-                onPress={() => adjustSwaraVolume(-0.1)}
-                disabled={swaraVolume <= 0}
-              >
-                <Text style={styles.holdTimeButtonText}>-</Text>
-              </TouchableOpacity>
-              
-              <View style={styles.holdTimeDisplay}>
-                <Text style={styles.holdTimeValue}>{Math.round(swaraVolume * 100)}%</Text>
-              </View>
-              
-              <TouchableOpacity 
-                style={[styles.holdTimeButton, { opacity: swaraVolume >= 1 ? 0.5 : 1 }]}
-                onPress={() => adjustSwaraVolume(0.1)}
-                disabled={swaraVolume >= 1}
-              >
-                <Text style={styles.holdTimeButtonText}>+</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.holdTimeDescription}>
-              Volume level for swara reference tones (0-100%)
-            </Text>
+
+            {/* Raag-based Practice */}
             <TouchableOpacity
-              style={[styles.holdTimeButton, { marginTop: 10, paddingHorizontal: 20 }]}
+              style={[
+                styles.practiceModeCard,
+                !isPremium && styles.premiumCard
+              ]}
               onPress={() => {
-                // Test the current volume by playing Sa tone
-                if (saFrequency) {
-                  playSwaraTone(saFrequency, 1.0);
+                if (isPremium) {
+                  setPracticeMode('raag');
+                } else {
+                  setShowUpgradeModal(true);
                 }
               }}
             >
-              <Text style={[styles.holdTimeButtonText, { fontSize: 14 }]}>🔊 Test</Text>
+              <View style={styles.cardHeader}>
+                <Text style={styles.practiceModeIcon}>�</Text>
+                {!isPremium && <Text style={styles.premiumBadge}>✨ Premium</Text>}
+              </View>
+              <Text style={styles.practiceModeTitle}>Raag Practice</Text>
+              <Text style={styles.practiceModeDescription}>
+                Master classical raags with guided sequences
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    // If practice mode is selected, show the relevant setup screen
+    return (
+      <View style={styles.setupContainer}>
+        
+
+          <View style={styles.setupHeader}>
+            <TouchableOpacity 
+              style={styles.backArrow}
+              onPress={() => setPracticeMode(null)}
+            >
+              <Text style={styles.backArrowText}>←</Text>
+            </TouchableOpacity> 
+            <Text style={styles.widgetTitle}>
+               {practiceMode === 'raag' ? 'Raag Practice' : 'Free Practice'}
+              </Text>
+          </View>
+          
+        
+        {saFrequency ? (
+          <View style={styles.saDisplayContainer}>
+            <Text style={styles.saDisplayLabel}>Your Sa Frequency:</Text>
+            <Text style={styles.saDisplayValue}>{Math.round(saFrequency)} Hz</Text>
+            <TouchableOpacity
+              style={styles.changeSaSetupButton}
+              onPress={() => setGameState('saDetection')}
+            >
+              <Text style={styles.changeSaText}>🔄 Change Sa</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.noSaContainer}>
+            <Text style={styles.noSaText}>⚠️ Sa not set</Text>
+            <TouchableOpacity
+              style={styles.setSaButton}
+              onPress={() => setGameState('saDetection')}
+            >
+              <Text style={styles.buttonText}>🎯 Set Sa First</Text>
             </TouchableOpacity>
           </View>
         )}
+
+        {/* Raag Selector - only for raag mode */}
+        {practiceMode === 'raag' && (
+          <View style={styles.raagSelectorContainer}>
+            <Text style={styles.raagSelectorTitle}>🎵 Select Raag</Text>
+            <TouchableOpacity
+              style={styles.raagSelectorButton}
+              onPress={() => setShowRaagSelector(true)}
+            >
+              <Text style={styles.raagSelectorText}>
+                {isLoadingRaag 
+                  ? '⏳ Loading Raag...' 
+                  : selectedRaag 
+                    ? `📜 ${selectedRaag}` 
+                    : '📜 Choose a Raag to Practice'}
+              </Text>
+              {selectedRaag && !isLoadingRaag && (
+                <View style={styles.raagProgressContainer}>
+                  <Text style={styles.raagProgressText}>
+                    {currentRaagSequence.toUpperCase()} • 
+                    Progress: {Object.values(raagProgress).filter(Boolean).length}/3
+                  </Text>
+                  {completedRaags.includes(selectedRaag) && (
+                    <Text style={styles.completedBadge}>✅ MASTERED</Text>
+                  )}
+                </View>
+              )}
+            </TouchableOpacity>
+            {selectedRaag && (
+              <TouchableOpacity
+                style={styles.clearRaagButton}
+                onPress={() => {
+                  setSelectedRaag(null);
+                  setSwaraSequence(['S']);
+                  setCurrentSwaraIndex(0);
+                }}
+              >
+                <Text style={styles.clearRaagText}>❌ Clear Selection</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Swara Selector - only for freeform mode */}
+        {practiceMode === 'freeform' && (
+          <View style={styles.swaraSelectorContainer}>
+            <Text style={styles.swaraSelectorTitle}>🎵 Select Swara to Practice</Text>
+            <View style={styles.swaraGrid}>
+              {[
+                { name: 'S', label: 'Sa', description: 'Tonic (Do)', free: true },
+                { name: 'R', label: 'Shuddha Re', description: 'Major 2nd', free: true },
+                { name: 'G', label: 'Shuddha Ga', description: 'Major 3rd', free: true },
+                { name: 'M', label: 'Shuddha Ma', description: 'Perfect 4th', free: true },
+                { name: 'P', label: 'Pa', description: 'Perfect 5th', free: true },
+                { name: 'r', label: 'Komal Re', description: 'Minor 2nd', premium: true },
+                { name: 'g', label: 'Komal Ga', description: 'Minor 3rd', premium: true },
+                { name: 'm', label: 'Tivra Ma', description: 'Augmented 4th', premium: true },
+                { name: 'd', label: 'Komal Dha', description: 'Minor 6th', premium: true },
+                { name: 'D', label: 'Shuddha Dha', description: 'Major 6th', premium: true },
+                { name: 'n', label: 'Komal Ni', description: 'Minor 7th', premium: true },
+                { name: 'N', label: 'Shuddha Ni', description: 'Major 7th', premium: true },
+              ].map((swara) => {
+                const isLocked = swara.premium && !isPremium;
+                return (
+                  <TouchableOpacity
+                    key={swara.name}
+                    style={[
+                      styles.swaraButton,
+                      selectedFreeSwara === swara.name && styles.selectedSwaraButton,
+                      isLocked && styles.lockedSwaraButton
+                    ]}
+                    onPress={() => {
+                      if (isLocked) {
+                        setShowUpgradeModal(true);
+                      } else {
+                        setSelectedFreeSwara(swara.name);
+                      }
+                    }}
+                  >
+                    <View style={styles.swaraButtonContent}>
+                      <Text style={[
+                        styles.swaraButtonText,
+                        selectedFreeSwara === swara.name && styles.selectedSwaraButtonText,
+                        isLocked && styles.lockedSwaraButtonText
+                      ]}>
+                        {swara.name}
+                      </Text>
+                      {isLocked && <Text style={styles.premiumIcon}>✨</Text>}
+                    </View>
+                    <Text style={[
+                      styles.swaraButtonLabel,
+                      selectedFreeSwara === swara.name && styles.selectedSwaraButtonLabel,
+                      isLocked && styles.lockedSwaraButtonLabel
+                    ]}>
+                      {swara.label}
+                    </Text>
+                    <Text style={[
+                      styles.swaraButtonDescription,
+                      selectedFreeSwara === swara.name && styles.selectedSwaraButtonDescription,
+                      isLocked && styles.lockedSwaraButtonDescription
+                    ]}>
+                      {swara.description}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {selectedFreeSwara && (
+              <TouchableOpacity
+                style={styles.clearSwaraButton}
+                onPress={() => setSelectedFreeSwara(null)}
+              >
+                <Text style={styles.clearSwaraText}>❌ Clear Selection</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Start Button */}
+        <TouchableOpacity
+          style={[
+            styles.startSadhanaButton,
+            { 
+              backgroundColor: '#FF6B35',
+              opacity: (saFrequency && (practiceMode === 'freeform' ? selectedFreeSwara : (practiceMode === 'raag' && selectedRaag && !isLoadingRaag))) ? 1 : 0.5 
+            }
+          ]}
+          onPress={startGame}
+          disabled={!saFrequency || (practiceMode === 'raag' && (!selectedRaag || isLoadingRaag)) || (practiceMode === 'freeform' && !selectedFreeSwara)}
+        >
+          <Text style={styles.buttonText}>
+            {practiceMode === 'raag' 
+              ? '🎼 Start Raag Practice' 
+              : selectedFreeSwara 
+                ? `🎶 Practice ${selectedFreeSwara}` 
+                : '🎶 Select Swara First'
+            }
+          </Text>
+          {practiceMode === 'freeform' && selectedFreeSwara && (
+            <Text style={styles.startButtonSubtext}>
+              Practice single swara: {selectedFreeSwara}
+            </Text>
+          )}
+        </TouchableOpacity>
+        
+        {/* Invisible spacer to prevent cutoff */}
+        <View style={styles.invisibleSpacer} />
       </View>
-      
-      {/* Empty content to prevent clipping */}
-      <View style={styles.bottomSpacer} />
-    </View>
-  );
+    );
+  };
 
   const renderRaagSelectorModal = () => (
     <Modal
@@ -1396,6 +1472,184 @@ const RiyaazScreen = () => {
     </Modal>
   );
 
+  // Upgrade Modal
+  const renderUpgradeModal = () => (
+    <Modal
+      visible={showUpgradeModal}
+      animationType="slide"
+      transparent={true}
+      onRequestClose={() => setShowUpgradeModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.upgradeModal}>
+          <Text style={styles.upgradeTitle}>✨ Upgrade to Premium</Text>
+          <Text style={styles.upgradeSubtitle}>Unlock all features and content</Text>
+          
+          <View style={styles.featuresList}>
+            <View style={styles.featureItem}>
+              <Text style={styles.featureIcon}>🎼</Text>
+              <Text style={styles.featureText}>Access all 100+ classical raags</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Text style={styles.featureIcon}>🎵</Text>
+              <Text style={styles.featureText}>Practice all 12 swaras in free mode</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Text style={styles.featureIcon}>🔄</Text>
+              <Text style={styles.featureText}>Unlimited practice sessions</Text>
+            </View>
+            <View style={styles.featureItem}>
+              <Text style={styles.featureIcon}>📱</Text>
+              <Text style={styles.featureText}>Ad-free experience</Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={styles.upgradeButton}
+            onPress={upgradeToPremium}
+          >
+            <Text style={styles.upgradeButtonText}>Upgrade Now - $4.99</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cancelUpgradeButton}
+            onPress={() => setShowUpgradeModal(false)}
+          >
+            <Text style={styles.cancelUpgradeText}>Maybe Later</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  // Settings Modal
+  const renderSettingsModal = () => (
+    <Modal
+      visible={showSettingsModal}
+      animationType="slide"
+      onRequestClose={() => setShowSettingsModal(false)}
+    >
+      <View style={styles.modalContainer}>
+        <View style={styles.modalHeader}>
+          <Text style={styles.modalTitle}>⚙️ Settings</Text>
+          <TouchableOpacity
+            style={styles.closeButton}
+            onPress={() => setShowSettingsModal(false)}
+          >
+            <Text style={styles.closeButtonText}>✕</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={styles.settingsContent}>
+          {/* Hold Time Setting */}
+          <View style={styles.settingItem}>
+            <Text style={styles.settingLabel}>Hold Time</Text>
+            <Text style={styles.settingDescription}>
+              Duration to hold each swara correctly
+            </Text>
+            <View style={styles.holdTimeControls}>
+              <TouchableOpacity
+                style={styles.holdTimeButton}
+                onPress={() => adjustHoldTime(-0.5)}
+              >
+                <Text style={styles.holdTimeButtonText}>-</Text>
+              </TouchableOpacity>
+              <Text style={styles.holdTimeValue}>{holdTime}s</Text>
+              <TouchableOpacity
+                style={styles.holdTimeButton}
+                onPress={() => adjustHoldTime(0.5)}
+              >
+                <Text style={styles.holdTimeButtonText}>+</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Pitch Tolerance Setting */}
+          <View style={styles.settingItem}>
+            <Text style={styles.settingLabel}>Pitch Tolerance</Text>
+            <Text style={styles.settingDescription}>
+              How precise your pitch needs to be
+            </Text>
+            <View style={styles.toleranceControls}>
+              <TouchableOpacity
+                style={[styles.toleranceButton, tolerance >= 75 && styles.toleranceButtonActive]}
+                onPress={() => setTolerance(75)}
+              >
+                <Text style={[styles.toleranceButtonText, tolerance >= 75 && styles.toleranceButtonTextActive]}>
+                  Easy
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toleranceButton, tolerance === 50 && styles.toleranceButtonActive]}
+                onPress={() => setTolerance(50)}
+              >
+                <Text style={[styles.toleranceButtonText, tolerance === 50 && styles.toleranceButtonTextActive]}>
+                  Medium
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toleranceButton, tolerance <= 25 && styles.toleranceButtonActive]}
+                onPress={() => setTolerance(25)}
+              >
+                <Text style={[styles.toleranceButtonText, tolerance <= 25 && styles.toleranceButtonTextActive]}>
+                  Hard
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Volume Setting */}
+          <View style={styles.settingItem}>
+            <Text style={styles.settingLabel}>Reference Tone Volume</Text>
+            <Text style={styles.settingDescription}>
+              Volume of the swara reference tones
+            </Text>
+            <View style={styles.volumeControls}>
+              <TouchableOpacity
+                style={styles.volumeButton}
+                onPress={() => adjustSwaraVolume(-0.1)}
+              >
+                <Text style={styles.volumeButtonText}>🔉</Text>
+              </TouchableOpacity>
+              <View style={styles.volumeSlider}>
+                <View
+                  style={[
+                    styles.volumeFill,
+                    { width: `${swaraVolume * 100}%` }
+                  ]}
+                />
+              </View>
+              <TouchableOpacity
+                style={styles.volumeButton}
+                onPress={() => adjustSwaraVolume(0.1)}
+              >
+                <Text style={styles.volumeButtonText}>🔊</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.volumeValue}>{Math.round(swaraVolume * 100)}%</Text>
+          </View>
+
+          {/* Reset Sa Setting */}
+          <View style={styles.settingItem}>
+            <Text style={styles.settingLabel}>Sa Frequency</Text>
+            <Text style={styles.settingDescription}>
+              {saFrequency ? `Current Sa: ${Math.round(saFrequency)} Hz` : 'Sa not set'}
+            </Text>
+            <TouchableOpacity
+              style={styles.resetSaButton}
+              onPress={() => {
+                setShowSettingsModal(false);
+                setGameState('saDetection');
+              }}
+            >
+              <Text style={styles.resetSaButtonText}>🎯 Reset Sa</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+
   // Animated background particles for immersive experience
   const renderAnimatedBackground = () => {
     const particles = [];
@@ -1432,238 +1686,281 @@ const RiyaazScreen = () => {
     
     return (
       <View style={styles.gameContainer}>
-        {/* Compact header with level and settings */}
-        <View style={styles.compactGameHeader}>
-          <View style={styles.headerLeft}>
-            <Text style={styles.compactTitleText}>Swar Sadhana</Text>
-            <View style={styles.levelAndDifficultyRow}>
-              <Text style={styles.levelIndicator}>Level {userLevel} • Basic</Text>
-              <View style={styles.difficultyIndicator}>
-                <Text style={styles.currentDifficultyIcon}>
-                  {difficultySettings[difficulty].icon}
-                </Text>
-                <Text style={[
-                  styles.currentDifficultyText,
-                  { color: difficultySettings[difficulty].color }
-                ]}>
-                  {difficultySettings[difficulty].name}
-                </Text>
-              </View>
-            </View>
-            
-            {/* Stats section directly below title */}
-            <View style={styles.inlineStatsSection}>
-              <View style={styles.inlineStatCard}>
-                <Text style={styles.inlineStatValue}>{streak}</Text>
-                <Text style={styles.inlineStatLabel}>Streak</Text>
-              </View>
-              <View style={styles.inlineStatCard}>
-                <Text style={styles.inlineStatValue}>{userCoins}</Text>
-                <Text style={styles.inlineStatLabel}>Coins</Text>
-              </View>
-              <View style={styles.inlineStatCard}>
-                <Text style={styles.inlineStatValue}>{currentScore}</Text>
-                <Text style={styles.inlineStatLabel}>Score</Text>
-              </View>
-            </View>
-          </View>
-          
-          <View style={styles.headerIcons}>
+        {/* Combined Training Analytics Widget */}
+        <View style={styles.trainingAnalyticsWidget}>
+          <View style={styles.widgetHeader}>
             <TouchableOpacity 
-              style={styles.homeButton}
+              style={styles.backArrow}
               onPress={resetGame}
             >
-              <Text style={styles.homeIcon}>🏠</Text>
+              <Text style={styles.backArrowText}>←</Text>
             </TouchableOpacity>
-            
-            <TouchableOpacity 
-              style={styles.headerSettingsButton}
-              onPress={() => Alert.alert('Settings', 'Settings panel coming soon!')}
-            >
-              <Text style={styles.settingsIcon}>⚙️</Text>
-            </TouchableOpacity>
+            <Text style={styles.widgetTitle}>Practice Analytics</Text>
           </View>
-        </View>
 
-        {/* Compact Current Swara Display with Sequence */}
-        <View style={styles.compactSwaraCard}>
-          <Text style={styles.currentSwaraLabel}>Current Swara</Text>
-          <View style={styles.currentSwaraContainer}>
-            <Animated.Text 
-              style={[
-                styles.compactCurrentSwaraText,
-                { transform: [{ scale: scaleValue }] }
-              ]}
-            >
-              {currentSwara}
-            </Animated.Text>
-            <TouchableOpacity
-              style={styles.playTanpuraButton}
-              onPress={playCurrentSwaraTone}
-            >
-              <Text style={styles.playTanpuraIcon}>🔊</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.compactProgressText}>
-            {currentSwaraIndex + 1} of {swaraSequence.length}
-          </Text>
-          
-          {/* Raag Sequence Label */}
-          {selectedRaag && (
-            <View style={styles.sequenceLabelContainer}>
-              <Text style={styles.sequenceLabel}>
-                {selectedRaag} • {currentRaagSequence.toUpperCase()}
-              </Text>
-              <View style={styles.sequenceProgressDots}>
-                <View style={[
-                  styles.sequenceDot,
-                  { backgroundColor: raagProgress.arohi ? '#4CAF50' : (currentRaagSequence === 'arohi' ? '#FF6B35' : '#666') }
-                ]} />
-                <View style={[
-                  styles.sequenceDot,
-                  { backgroundColor: raagProgress.avrohi ? '#4CAF50' : (currentRaagSequence === 'avrohi' ? '#FF6B35' : '#666') }
-                ]} />
-                <View style={[
-                  styles.sequenceDot,
-                  { backgroundColor: raagProgress.pakad ? '#4CAF50' : (currentRaagSequence === 'pakad' ? '#FF6B35' : '#666') }
-                ]} />
-              </View>
-            </View>
-          )}
-          
-          {/* Sequence Progress directly below current swara */}
-          <View style={styles.inlineSequenceRow}>
-            {swaraSequence.map((swara, index) => (
-              <View 
-                key={index} 
-                style={[
-                  styles.inlineSequenceItem,
-                  {
-                    backgroundColor: index === currentSwaraIndex ? '#FF6B35' :
-                                   index < currentSwaraIndex ? '#4CAF50' : '#444'
-                  }
-                ]}
-              >
-                <Text style={styles.inlineSequenceText}>{swara}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-
-        {/* Progress and Frequency Section */}
-        <View style={styles.mainGameSection}>
-          {/* Hold Progress */}
-          <View style={styles.progressSection}>
-            <Text style={styles.sectionTitle}>Hold Progress</Text>
-            <View style={styles.progressCircleContainer}>
-              <View style={styles.progressCircle}>
-                <View style={styles.progressBackground} />
-                <Animated.View 
+           <View style={styles.swaraWheel}>
+            {/* Outer ring with all 12 swaras */}
+            {['S', 'r', 'R', 'g', 'G', 'M', 'm', 'P', 'd', 'D', 'n', 'N'].map((swara, index) => {
+              const angle = (index * 30) - 90; // Start from top, 30° apart
+              const radius = 75;
+              const x = radius * Math.cos((angle * Math.PI) / 180);
+              const y = radius * Math.sin((angle * Math.PI) / 180);
+              
+              const isTarget = swara === currentSwara;
+              const isUserSinging = swara === userCurrentSwara;
+              const isInSequence = swaraSequence.includes(swara);
+              
+              return (
+                <TouchableOpacity
+                  key={swara}
                   style={[
-                    styles.progressFill,
+                    styles.swaraPoint,
                     {
-                      borderColor: isHoldingCorrectly ? '#4CAF50' : '#FF6B35',
-                      transform: [{
-                        rotate: progressValue.interpolate({
-                          inputRange: [0, 100],
-                          outputRange: ['0deg', '360deg'],
-                        })
-                      }]
+                      left: 90 + x - 15, // Center - half width
+                      top: 90 + y - 15,  // Center - half height
+                      backgroundColor: isTarget ? '#FF6B35' : 
+                                     isUserSinging ? '#4CAF50' : 
+                                     isInSequence ? 'rgba(255, 255, 255, 0.1)' : 'rgba(255, 255, 255, 0.05)',
+                      borderColor: isTarget ? '#FF8A50' : 
+                                  isUserSinging ? '#66BB6A' : 'rgba(255, 255, 255, 0.2)',
+                      borderWidth: isTarget || isUserSinging ? 2 : 1,
+                      transform: [{ scale: isTarget || isUserSinging ? 1.2 : 1 }],
                     }
-                  ]} 
-                />
-                <View style={styles.progressCenter}>
-                  <Text style={styles.progressTime}>
-                    {Math.max(0, holdTime - currentHoldTime).toFixed(1)}
+                  ]}
+                  onPress={() => {
+                    const swaraFreq = getSwaraFrequency(swara);
+                    playSwaraTone(swaraFreq, 1.5);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
+                    styles.swaraPointText,
+                    { 
+                      color: (isTarget || isUserSinging) ? '#fff' : 
+                             isInSequence ? '#ccc' : '#888',
+                      fontWeight: (isTarget || isUserSinging) ? 'bold' : 'normal',
+                    }
+                  ]}>
+                    {swara}
                   </Text>
-                  <Text style={styles.progressLabel}>seconds</Text>
-                </View>
-              </View>
-            </View>
-          </View>
-
-          {/* Frequency Matching */}
-          <View style={styles.frequencySection}>
-            <Text style={styles.sectionTitle}>Pitch Match</Text>
-            <View style={styles.frequencyDisplay}>
-              <View style={styles.frequencyBar}>
-                <Text style={styles.frequencyLabel}>Target</Text>
-                <View style={styles.frequencyBarContainer}>
-                  <View 
-                    style={[
-                      styles.frequencyBarFill,
-                      styles.targetBar,
-                      { 
-                        height: `${Math.min(100, Math.max(10, 
-                          ((getSwaraFrequency(currentSwara) - 150) / 400) * 100
-                        ))}%` 
-                      }
-                    ]}
-                  />
-                </View>
-                <Text style={styles.frequencyValue}>
+                </TouchableOpacity>
+              );
+            })}
+            
+            {/* Center hub */}
+            <View style={styles.centerHub}>
+              <View style={styles.targetDisplay}>
+                <Text style={styles.targetLabel}>TARGET</Text>
+                <Animated.Text 
+                  style={[
+                    styles.targetSwara,
+                    { transform: [{ scale: scaleValue }] }
+                  ]}
+                >
+                  {currentSwara}
+                </Animated.Text>
+                <Text style={styles.targetFreq}>
                   {Math.round(getSwaraFrequency(currentSwara))} Hz
                 </Text>
               </View>
-
-              <View style={styles.frequencyBar}>
-                <Text style={styles.frequencyLabel}>Your Voice</Text>
-                <View style={styles.frequencyBarContainer}>
-                  <View 
+              
+              {userCurrentSwara && userCurrentSwara !== currentSwara && (
+                <View style={styles.userDisplay}>
+                  <Text style={styles.userLabel}>YOU</Text>
+                  <Text style={styles.userSwara}>{userCurrentSwara}</Text>
+                  <Text style={styles.userFreq}>
+                    {currentPitch?.frequency ? Math.round(currentPitch.frequency) : 0} Hz
+                  </Text>
+                </View>
+              )}
+              
+              {userCurrentSwara === currentSwara && (
+                <View style={styles.matchDisplay}>
+                  <Text style={styles.matchText}>✓ MATCH</Text>
+                  <Text style={styles.matchFreq}>
+                    {currentPitch?.frequency ? Math.round(currentPitch.frequency) : 0} Hz
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+          
+         
+          
+          {/* Three metric cards in a row */}
+          <View style={styles.metricsRow}>
+            {/* Hold Progress Card */}
+            <View style={styles.metricCard}>
+              <Text style={styles.metricLabel}>Hold Progress</Text>
+              <View style={styles.circularProgress}>
+                <View style={styles.progressRing}>
+                  <Animated.View
                     style={[
-                      styles.frequencyBarFill,
-                      styles.currentBar,
-                      { 
-                        height: `${Math.min(100, Math.max(10, 
-                          currentPitch?.frequency ? ((currentPitch.frequency - 150) / 400) * 100 : 0
-                        ))}%`,
-                        backgroundColor: pitchAccuracy > 70 ? '#4CAF50' : 
-                                       pitchAccuracy > 50 ? '#FFC107' : '#F44336',
+                      styles.progressRingFill,
+                      {
+                        transform: [{
+                          rotate: progressValue.interpolate({
+                            inputRange: [0, 100],
+                            outputRange: ['0deg', '360deg'],
+                          })
+                        }],
+                        borderColor: isHoldingCorrectly ? '#4CAF50' : '#FF6B35',
                       }
                     ]}
                   />
                 </View>
-                <Text style={styles.frequencyValue}>
-                  {currentPitch?.frequency ? Math.round(currentPitch.frequency) : 0} Hz
-                </Text>
+                <View style={styles.progressCenter}>
+                  <Text style={styles.progressPercentage}>
+                    {Math.round((currentHoldTime / holdTime) * 100)}%
+                  </Text>
+                  <Text style={styles.progressTime}>
+                    {Math.max(0, holdTime - currentHoldTime).toFixed(1)}s
+                  </Text>
+                </View>
               </View>
             </View>
 
-            {/* Pitch Deviation */}
-            <View style={styles.deviationDisplay}>
-              <Text style={styles.deviationLabel}>Deviation:</Text>
-              <Text style={[
-                styles.deviationValue,
-                { 
-                  color: Math.abs(getPitchDeviation(currentPitch?.frequency, getSwaraFrequency(currentSwara)) || 0) <= 25 ? '#4CAF50' : 
-                        Math.abs(getPitchDeviation(currentPitch?.frequency, getSwaraFrequency(currentSwara)) || 0) <= 50 ? '#FFC107' : '#F44336'
-                }
-              ]}>
+            {/* Pitch Accuracy Card */}
+            <View style={styles.metricCard}>
+              <Text style={styles.metricLabel}>Pitch Accuracy</Text>
+              <View style={styles.linearProgressContainer}>
+                <View
+                  style={[
+                    styles.linearProgressFill,
+                    {
+                      width: `${pitchAccuracy}%`,
+                      backgroundColor: pitchAccuracy > 80 ? '#4CAF50' : 
+                                     pitchAccuracy > 60 ? '#8BC34A' :
+                                     pitchAccuracy > 40 ? '#FFC107' : '#F44336',
+                    }
+                  ]}
+                />
+              </View>
+              <Text style={styles.metricValue}>{Math.round(pitchAccuracy)}%</Text>
+              <Text style={styles.metricSubtext}>
                 {currentPitch?.frequency && saFrequency ? 
                   `${getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara)) > 0 ? '+' : ''}${Math.round(getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara)) || 0)} cents` 
                   : '-- cents'
                 }
               </Text>
             </View>
+
+            {/* Pitch Stability Card */}
+            <View style={styles.metricCard}>
+              <Text style={styles.metricLabel}>Voice Stability</Text>
+              <View style={styles.linearProgressContainer}>
+                <View
+                  style={[
+                    styles.linearProgressFill,
+                    {
+                      width: `${pitchStability}%`,
+                      backgroundColor: pitchStability > 80 ? '#2E7D32' : 
+                                     pitchStability > 60 ? '#66BB6A' :
+                                     pitchStability > 40 ? '#FFC107' : '#F44336',
+                    }
+                  ]}
+                />
+              </View>
+              <Text style={styles.metricValue}>{pitchStability}%</Text>
+              <Text style={styles.metricSubtext}>{stabilityFeedback}</Text>
+            </View>
+          </View>
+           {/* Progress and controls */}
+          <View style={styles.wheelControls}>
+            <View style={styles.progressInfo}>
+              <Text style={styles.progressText}>
+                {currentSwaraIndex + 1} of {swaraSequence.length}
+              </Text>
+              {selectedRaag && (
+                <Text style={styles.raagText}>
+                  {selectedRaag} • {currentRaagSequence.toUpperCase()}
+                </Text>
+              )}
+            </View>
+          </View>
+
+          {/* Play Button - Centered below metrics */}
+          <TouchableOpacity
+            style={styles.playTanpuraButton}
+            onPress={() => {
+              if (swaraSequence[currentSwaraIndex]) {
+                const freq = getSwaraFrequency(swaraSequence[currentSwaraIndex]);
+                console.log('Playing tanpura for:', swaraSequence[currentSwaraIndex], 'at', freq, 'Hz');
+                playSwaraTone(freq, 2.0).catch(error => {
+                  console.error('Error playing swara tone:', error);
+                });
+              }
+            }}
+          >
+            <Text style={styles.playTanpuraText}>♪ Play Reference</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Professional Swara Circle Display */}
+        <View style={styles.swaraCircleContainer}>
+         
+          
+          {/* Sequence Progress Bar */}
+          <View style={styles.sequenceProgress}>
+            <Text style={styles.sequenceLabel}>Sequence Progress</Text>
+            <View style={styles.sequenceRow}>
+              {swaraSequence.map((swara, index) => (
+                <View 
+                  key={index} 
+                  style={[
+                    styles.sequenceItem,
+                    {
+                      backgroundColor: index === currentSwaraIndex ? '#FF6B35' :
+                                     index < currentSwaraIndex ? '#4CAF50' : 
+                                     'rgba(255, 255, 255, 0.1)',
+                      borderColor: index === currentSwaraIndex ? '#FF8A50' :
+                                 index < currentSwaraIndex ? '#66BB6A' : 
+                                 'rgba(255, 255, 255, 0.2)',
+                    }
+                  ]}
+                >
+                  <Text style={[
+                    styles.sequenceItemText,
+                    {
+                      color: index <= currentSwaraIndex ? '#fff' : '#999',
+                      fontWeight: index === currentSwaraIndex ? 'bold' : 'normal',
+                    }
+                  ]}>
+                    {swara}
+                  </Text>
+                </View>
+              ))}
+            </View>
           </View>
         </View>
 
-        {/* Accuracy Bar */}
-        <View style={styles.accuracySection}>
-          <Text style={styles.sectionTitle}>Pitch Accuracy</Text>
-          <View style={styles.accuracyBarContainer}>
-            <View 
-              style={[
-                styles.accuracyBarFill,
-                { 
-                  width: `${pitchAccuracy}%`,
-                  backgroundColor: pitchAccuracy > 70 ? '#4CAF50' : 
-                                 pitchAccuracy > 50 ? '#FFC107' : '#F44336',
-                }
-              ]}
-            />
+        {/* Tolerance Adjustment Section */}
+        <View style={styles.toleranceSection}>
+          <Text style={styles.sectionTitle}>Pitch Tolerance</Text>
+          <View style={styles.toleranceControls}>
+            <TouchableOpacity 
+              style={styles.toleranceButton} 
+              onPress={() => adjustTolerance('easier')}
+            >
+              <Text style={styles.toleranceButtonText}>←</Text>
+            </TouchableOpacity>
+            <View style={styles.toleranceInfo}>
+              <Text style={styles.toleranceLevel}>{toleranceLevel}</Text>
+              <Text style={styles.toleranceValue}>±{tolerance} cents</Text>
+            </View>
+            <TouchableOpacity 
+              style={styles.toleranceButton} 
+              onPress={() => adjustTolerance('harder')}
+            >
+              <Text style={styles.toleranceButtonText}>→</Text>
+            </TouchableOpacity>
           </View>
-          <Text style={styles.accuracyText}>{Math.round(pitchAccuracy)}% accuracy</Text>
+          <Text style={styles.toleranceDescription}>
+            {tolerance >= 75 ? 'Very forgiving - great for beginners' :
+             tolerance >= 50 ? 'Balanced - good for practice' :
+             tolerance >= 35 ? 'Precise - for intermediate singers' :
+             'Expert level - perfect pitch required'}
+          </Text>
         </View>
 
         {/* Feedback */}
@@ -1683,8 +1980,8 @@ const RiyaazScreen = () => {
 
   const renderPausedScreen = () => (
     <View style={styles.pausedContainer}>
-      <Text style={styles.pausedTitle}>⏸️ Game Paused</Text>
-      <Text style={styles.pausedScore}>Score: {currentScore}</Text>
+      <Text style={styles.pausedTitle}>⏸️ Practice Paused</Text>
+      <Text style={styles.pausedScore}>Take a break and resume when ready</Text>
       
       <View style={styles.pausedControls}>
         <TouchableOpacity style={styles.resumeButton} onPress={resumeGame}>
@@ -1700,26 +1997,15 @@ const RiyaazScreen = () => {
 
   const renderCompletedScreen = () => (
     <View style={styles.completedContainer}>
-      <Text style={styles.completedTitle}>🎉 Level Complete!</Text>
-      <Text style={styles.finalScore}>Final Score: {currentScore}</Text>
-      
-      <View style={styles.rewardsDisplay}>
-        <View style={styles.rewardItem}>
-          <Text style={styles.rewardIcon}>⭐</Text>
-          <Text style={styles.rewardText}>+{Math.round(currentScore / 10)} XP</Text>
-        </View>
-        <View style={styles.rewardItem}>
-          <Text style={styles.rewardIcon}>🪙</Text>
-          <Text style={styles.rewardText}>+{Math.round(currentScore / 50)} Coins</Text>
-        </View>
-      </View>
+      <Text style={styles.completedTitle}>🎉 Practice Complete!</Text>
+      <Text style={styles.finalScore}>Well done! Keep practicing to improve your accuracy.</Text>
       
       <View style={styles.completedControls}>
         <TouchableOpacity 
           style={styles.continueButton} 
-          onPress={() => startGame()} // Continue with same difficulty
+          onPress={() => startGame()} // Continue practice
         >
-          <Text style={styles.buttonText}>🚀 Continue</Text>
+          <Text style={styles.buttonText}>🚀 Practice Again</Text>
         </TouchableOpacity>
         
         <TouchableOpacity style={styles.mainMenuButton} onPress={resetGame}>
@@ -1793,6 +2079,8 @@ const RiyaazScreen = () => {
       )}
       
       {renderRaagSelectorModal()}
+      {renderUpgradeModal()}
+      {renderSettingsModal()}
     </View>
   );
 };
@@ -1867,6 +2155,43 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#fff',
   },
+
+  // Header Controls
+  headerControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  headerToggle: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  headerToggleActive: {
+    backgroundColor: '#FF6B35',
+    borderColor: '#FF6B35',
+  },
+  headerToggleText: {
+    fontSize: 11,
+    color: '#ccc',
+    fontWeight: '600',
+  },
+  headerToggleTextActive: {
+    color: '#fff',
+  },
+  settingsButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
   
   // Compact Swara Card
   compactSwaraCard: {
@@ -1897,16 +2222,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 12,
     marginBottom: 4,
-  },
-  playTanpuraButton: {
-    backgroundColor: 'rgba(255, 107, 53, 0.2)',
-    borderRadius: 20,
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#FF6B35',
   },
   playTanpuraIcon: {
     fontSize: 16,
@@ -2339,6 +2654,733 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   
+  // Pitch Stability Section
+  stabilitySection: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  stabilityBarContainer: {
+    width: '100%',
+    height: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  stabilityBarFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  stabilityInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  stabilityText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  stabilityFeedbackText: {
+    fontSize: 12,
+    color: '#aaa',
+    fontStyle: 'italic',
+  },
+  
+  // Tolerance Adjustment Section
+  toleranceSection: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  toleranceControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  toleranceButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  toleranceButtonText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  toleranceInfo: {
+    alignItems: 'center',
+    flex: 1,
+    marginHorizontal: 16,
+  },
+  toleranceLevel: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  toleranceValue: {
+    fontSize: 14,
+    color: '#aaa',
+  },
+  toleranceDescription: {
+    fontSize: 12,
+    color: '#999',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    lineHeight: 16,
+  },
+  
+  // Loop Mode Section
+  loopSection: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  loopHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  toggleButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  toggleButtonActive: {
+    backgroundColor: '#FF6B35',
+    borderColor: '#FF6B35',
+  },
+  toggleButtonText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#aaa',
+  },
+  toggleButtonTextActive: {
+    color: '#fff',
+  },
+  loopControls: {
+    marginTop: 12,
+  },
+  loopTypeSelector: {
+    flexDirection: 'row',
+    marginBottom: 16,
+  },
+  loopTypeButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    marginRight: 8,
+    alignItems: 'center',
+  },
+  loopTypeButtonActive: {
+    backgroundColor: 'rgba(255, 107, 53, 0.2)',
+    borderColor: '#FF6B35',
+  },
+  loopTypeText: {
+    fontSize: 12,
+    color: '#aaa',
+    fontWeight: '600',
+  },
+  loopTypeTextActive: {
+    color: '#FF6B35',
+  },
+  loopInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  loopCountText: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '600',
+  },
+  maxLoopControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  loopAdjustButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  loopAdjustButtonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  maxLoopText: {
+    fontSize: 14,
+    color: '#fff',
+    marginHorizontal: 12,
+    fontWeight: '600',
+  },
+  
+  // Breath Guide Section
+  breathSection: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  breathHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  breathInfo: {
+    marginTop: 12,
+  },
+  breathDescription: {
+    fontSize: 12,
+    color: '#aaa',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  breathMomentIndicator: {
+    backgroundColor: 'rgba(135, 206, 250, 0.2)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#87CEEB',
+    alignItems: 'center',
+  },
+  breathMomentText: {
+    fontSize: 16,
+    color: '#87CEEB',
+    fontWeight: 'bold',
+  },
+  breathCount: {
+    fontSize: 11,
+    color: '#666',
+    textAlign: 'center',
+  },
+  sequenceItemContainer: {
+    alignItems: 'center',
+  },
+  breathMarker: {
+    position: 'absolute',
+    top: -8,
+    right: -4,
+    backgroundColor: 'rgba(135, 206, 250, 0.8)',
+    borderRadius: 10,
+    width: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  breathMarkerText: {
+    fontSize: 8,
+    lineHeight: 12,
+  },
+  
+  // Combined Training Analytics Widget
+  trainingAnalyticsWidget: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  widgetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  backArrow: {
+    padding: 8,
+    marginRight: 8,
+  },
+  backArrowText: {
+    fontSize: 24,
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  widgetTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    flex: 1,
+    textAlign: 'center',
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  metricCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    marginHorizontal: 4,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  metricLabel: {
+    fontSize: 12,
+    color: '#aaa',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  circularProgress: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  progressRing: {
+    width: 55,
+    height: 55,
+    borderRadius: 27.5,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressRingFill: {
+    position: 'absolute',
+    width: 51,
+    height: 51,
+    borderRadius: 25.5,
+    borderWidth: 3,
+    backgroundColor: 'transparent',
+  },
+  progressCenter: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 45,
+    height: 45,
+    top: 5,
+    left: 5,
+  },
+  progressPercentage: {
+    fontSize: 8,
+    fontWeight: 'bold',
+    color: '#fff',
+    lineHeight: 9,
+    marginBottom: -1,
+  },
+  progressTime: {
+    fontSize: 6,
+    color: '#aaa',
+    lineHeight: 7,
+    marginTop: -1,
+  },
+  linearProgressContainer: {
+    width: '100%',
+    height: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 3,
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  linearProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  metricValue: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  metricSubtext: {
+    fontSize: 10,
+    color: '#888',
+    textAlign: 'center',
+  },
+  metricFeedback: {
+    fontSize: 9,
+    color: '#999',
+    fontStyle: 'italic',
+    textAlign: 'center',
+  },
+  playTanpuraButton: {
+    backgroundColor: 'rgba(255, 107, 53, 0.2)',
+    borderWidth: 1,
+    borderColor: '#FF6B35',
+    borderRadius: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  playTanpuraText: {
+    color: '#FF6B35',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  
+  // Professional Swara Dial
+  swaraDialContainer: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  dialTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 24,
+  },
+  swaraCircle: {
+    width: 200,
+    height: 200,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    marginBottom: 20,
+  },
+  swaraNode: {
+    position: 'absolute',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+  },
+  swaraNodeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  dialCenter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderRadius: 40,
+    width: 80,
+    height: 80,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  dialCenterLabel: {
+    fontSize: 10,
+    color: '#aaa',
+    marginBottom: 2,
+  },
+  dialCenterSwara: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#FF6B35',
+  },
+  dialUserLabel: {
+    fontSize: 8,
+    color: '#4CAF50',
+    marginTop: 4,
+  },
+  dialUserSwara: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#4CAF50',
+  },
+  dialProgressInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginBottom: 16,
+  },
+  dialProgressText: {
+    fontSize: 14,
+    color: '#ccc',
+    fontWeight: '600',
+  },
+  playReferenceButton: {
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    borderWidth: 1,
+    borderColor: '#4CAF50',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  playReferenceText: {
+    color: '#4CAF50',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  raagInfoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  raagInfoText: {
+    fontSize: 12,
+    color: '#999',
+    flex: 1,
+  },
+  
+  // Simple user swara display
+  userSwaraLabel: {
+    fontSize: 14,
+    color: '#4CAF50',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  
+  // Professional Swara Circle
+  swaraCircleContainer: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  circleTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 20,
+  },
+  swaraWheel: {
+    width: 180,
+    height: 180,
+    position: 'relative',
+    marginBottom: 20,
+    alignItems: 'center',
+    alignSelf: 'center',
+  },
+  swaraPoint: {
+    position: 'absolute',
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  swaraPointText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  centerHub: {
+    position: 'absolute',
+    left: 40,
+    top: 40,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  targetDisplay: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  targetLabel: {
+    fontSize: 8,
+    color: '#FF6B35',
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    marginBottom: 1,
+  },
+  targetSwara: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#FF6B35',
+    marginTop: 0,
+    marginBottom: 1,
+    lineHeight: 22,
+  },
+  targetFreq: {
+    fontSize: 7,
+    color: '#FF8C69',
+    fontWeight: '500',
+    opacity: 0.8,
+    marginTop: 0,
+  },
+  userDisplay: {
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  userLabel: {
+    fontSize: 7,
+    color: '#4CAF50',
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+    marginBottom: 1,
+  },
+  userSwara: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#4CAF50',
+    lineHeight: 16,
+    marginBottom: 1,
+  },
+  userFreq: {
+    fontSize: 6,
+    color: '#81C784',
+    fontWeight: '500',
+    opacity: 0.8,
+  },
+  matchDisplay: {
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  matchText: {
+    fontSize: 10,
+    color: '#4CAF50',
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    lineHeight: 12,
+    marginBottom: 1,
+  },
+  matchFreq: {
+    fontSize: 6,
+    color: '#81C784',
+    fontWeight: '500',
+    opacity: 0.8,
+    marginTop: 0,
+  },
+  wheelControls: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  progressInfo: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  progressText: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  raagText: {
+    fontSize: 12,
+    color: '#aaa',
+  },
+  playButton: {
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    borderWidth: 2,
+    borderColor: '#4CAF50',
+    borderRadius: 20,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    shadowColor: '#4CAF50',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+  playButtonText: {
+    color: '#4CAF50',
+    fontSize: 14,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  
+  // Sequence Progress
+  sequenceProgress: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    width: '100%',
+  },
+  sequenceLabel: {
+    fontSize: 12,
+    color: '#aaa',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  sequenceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sequenceItem: {
+    minWidth: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 2,
+    marginVertical: 2,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+  },
+  sequenceItemText: {
+    fontSize: 11,
+    textAlign: 'center',
+  },
+  
   // Feedback Section
   feedbackSection: {
     alignItems: 'center',
@@ -2579,6 +3621,58 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 15,
     marginTop:0,
+  },
+  setupSubtitle: {
+    fontSize: 16,
+    color: '#ccc',
+    textAlign: 'center',
+    marginBottom: 30,
+    fontWeight: '500',
+  },
+  setupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  backButton: {
+    padding: 10,
+    marginRight: 10,
+  },
+  backButtonText: {
+    color: '#FF6B35',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  practiceModesContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  practiceModeCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 16,
+    padding: 24,
+    marginBottom: 20,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.3)',
+  },
+  practiceModeIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
+  practiceModeTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FF6B35',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  practiceModeDescription: {
+    fontSize: 14,
+    color: '#ccc',
+    textAlign: 'center',
+    lineHeight: 20,
   },
   saDisplayContainer: {
     backgroundColor: 'rgba(76, 175, 80, 0.1)',
@@ -2982,6 +4076,26 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
   
+  // Simple Header
+  simpleHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginBottom: 20,
+    marginHorizontal: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  simpleTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  
   // Paused Screen
   pausedContainer: {
     flex: 1,
@@ -3243,6 +4357,90 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontWeight: '500',
   },
+  
+  // Swara Selector Styles
+  swaraSelectorContainer: {
+    marginVertical: 20,
+    backgroundColor: 'rgba(76, 175, 80, 0.05)',
+    borderRadius: 15,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(76, 175, 80, 0.2)',
+  },
+  swaraSelectorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#4CAF50',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  swaraGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  swaraButton: {
+    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#4CAF50',
+    width: '30%',
+    alignItems: 'center',
+    minHeight: 80,
+  },
+  selectedSwaraButton: {
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    borderWidth: 2,
+    borderColor: '#4CAF50',
+  },
+  swaraButtonText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#4CAF50',
+    marginBottom: 4,
+  },
+  selectedSwaraButtonText: {
+    color: '#66BB6A',
+  },
+  swaraButtonLabel: {
+    fontSize: 12,
+    color: '#ccc',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  selectedSwaraButtonLabel: {
+    color: '#81C784',
+  },
+  swaraButtonDescription: {
+    fontSize: 10,
+    color: '#888',
+    textAlign: 'center',
+  },
+  selectedSwaraButtonDescription: {
+    color: '#A5D6A7',
+  },
+  clearSwaraButton: {
+    marginTop: 15,
+    backgroundColor: 'rgba(244, 67, 54, 0.1)',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#F44336',
+  },
+  clearSwaraText: {
+    color: '#F44336',
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  startButtonSubtext: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.8)',
+    marginTop: 5,
+    textAlign: 'center',
+  },
 
   // Modal Styles
   modalContainer: {
@@ -3388,6 +4586,239 @@ const styles = StyleSheet.create({
   noResultsSubtext: {
     fontSize: 14,
     color: '#aaa',
+  },
+  
+  // Premium and Upgrade Styles
+  upgradeButton: {
+    backgroundColor: '#FF6B35',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    marginRight: 10,
+  },
+  upgradeButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  premiumCard: {
+    opacity: 0.7,
+    borderWidth: 1,
+    borderColor: '#FF6B35',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  premiumBadge: {
+    backgroundColor: '#FF6B35',
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  upgradeModal: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  upgradeTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  upgradeSubtitle: {
+    fontSize: 16,
+    color: '#aaa',
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  featuresList: {
+    marginBottom: 24,
+  },
+  featureItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  featureIcon: {
+    fontSize: 20,
+    marginRight: 12,
+    width: 30,
+  },
+  featureText: {
+    fontSize: 16,
+    color: '#fff',
+    flex: 1,
+  },
+  cancelUpgradeButton: {
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  cancelUpgradeText: {
+    color: '#aaa',
+    fontSize: 16,
+  },
+  
+  // Settings Modal Styles
+  settingsContent: {
+    padding: 20,
+  },
+  settingItem: {
+    marginBottom: 24,
+    paddingBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  settingLabel: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  settingDescription: {
+    fontSize: 14,
+    color: '#aaa',
+    marginBottom: 12,
+  },
+  holdTimeControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  holdTimeButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 20,
+  },
+  holdTimeButtonText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  holdTimeValue: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#FF6B35',
+    minWidth: 40,
+    textAlign: 'center',
+  },
+  toleranceControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  toleranceButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    marginHorizontal: 4,
+    alignItems: 'center',
+  },
+  toleranceButtonActive: {
+    backgroundColor: '#FF6B35',
+  },
+  toleranceButtonText: {
+    color: '#aaa',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  toleranceButtonTextActive: {
+    color: '#fff',
+  },
+  volumeControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  volumeButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  volumeButtonText: {
+    fontSize: 20,
+  },
+  volumeSlider: {
+    flex: 1,
+    height: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 2,
+    marginHorizontal: 12,
+  },
+  volumeFill: {
+    height: '100%',
+    backgroundColor: '#FF6B35',
+    borderRadius: 2,
+  },
+  volumeValue: {
+    fontSize: 14,
+    color: '#aaa',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  resetSaButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  resetSaButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  
+  // Locked Swara Styles
+  lockedSwaraButton: {
+    opacity: 0.6,
+    borderColor: '#FF6B35',
+  },
+  lockedSwaraButtonText: {
+    color: '#aaa',
+  },
+  lockedSwaraButtonLabel: {
+    color: '#aaa',
+  },
+  lockedSwaraButtonDescription: {
+    color: '#aaa',
+  },
+  swaraButtonContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+  },
+  premiumIcon: {
+    fontSize: 12,
+    color: '#FF6B35',
+  },
+  
+  // Utility styles
+  invisibleSpacer: {
+    height: 50,
+    opacity: 0,
   },
 });
 
