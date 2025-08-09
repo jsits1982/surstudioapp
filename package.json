@@ -20,6 +20,7 @@
     "react-native": "0.80.2",
     "react-native-audio-api": "^0.7.0",
     "react-native-gesture-handler": "^2.28.0",
+    "react-native-iap": "^13.0.4",
     "react-native-permissions": "^3.10.1",
     "react-native-pitch-detector": "^0.1.6",
     "react-native-safe-area-context": "^5.5.2",

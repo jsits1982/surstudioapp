@@ -10,13 +10,24 @@ import {
   Alert,
   Modal,
   TextInput,
+  Platform,
+  ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as RNIap from 'react-native-iap';
 import useAudioRecorder from '../hooks/useAudioRecorder';
 import { playSwaraTone, stopSwaraTone, setSwaraVolume } from '../utils/TanpuraAudio';
 import raagNames from '../data/raagNames.json';
+import RaagSadhana from './RaagSadhana';
 
 const { width, height } = Dimensions.get('window');
+
+// In-App Purchase Configuration
+const PREMIUM_PRODUCT_ID = 'surstudio_premium_unlock'; // Configure this in App Store/Play Store
+const IAP_SKUS = Platform.select({
+  ios: [PREMIUM_PRODUCT_ID],
+  android: [PREMIUM_PRODUCT_ID],
+});
 
 const RiyaazScreen = () => {
   // Game state
@@ -29,13 +40,17 @@ const RiyaazScreen = () => {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   
+  // In-App Purchase state
+  const [isProcessingPurchase, setIsProcessingPurchase] = useState(false);
+  const [products, setProducts] = useState([]);
+  const [purchaseError, setPurchaseError] = useState(null);
+  
   // Raag practice specific state
   const [selectedRaag, setSelectedRaag] = useState(null);
   const [currentRaagSequence, setCurrentRaagSequence] = useState('arohi');
   const [raagSequenceNotes, setRaagSequenceNotes] = useState([]);
   const [showRaagSelector, setShowRaagSelector] = useState(false);
   const [completedRaags, setCompletedRaags] = useState([]);
-  const [raagProgress, setRaagProgress] = useState({ arohi: false, avrohi: false, pakad: false });
   const [isLoadingRaag, setIsLoadingRaag] = useState(false);
   
   // Raag data and search state
@@ -117,16 +132,215 @@ const RiyaazScreen = () => {
     }
   };
 
-  const upgradeToPremium = async () => {
-    // This would integrate with in-app purchases
+  // Initialize In-App Purchases
+  const initializeIAP = async () => {
     try {
-      // Simulate purchase for now
+      const result = await RNIap.initConnection();
+      console.log('IAP Connection result:', result);
+      
+      // Get available products
+      if (IAP_SKUS) {
+        const availableProducts = await RNIap.getProducts({ skus: IAP_SKUS });
+        setProducts(availableProducts);
+        console.log('Available products:', availableProducts);
+      }
+      
+      // Check for any pending purchases
+      await checkPendingPurchases();
+      
+    } catch (err) {
+      console.warn('IAP initialization error:', err);
+      // Fall back to development mode
+      if (__DEV__) {
+        console.log('Running in development mode - IAP not required');
+      }
+    }
+  };
+
+  // Check for pending/unfinished purchases
+  const checkPendingPurchases = async () => {
+    try {
+      const purchases = await RNIap.getAvailablePurchases();
+      console.log('Available purchases:', purchases);
+      
+      for (const purchase of purchases) {
+        if (purchase.productId === PREMIUM_PRODUCT_ID) {
+          // User has already purchased premium
+          await finalizePurchase(purchase);
+          break;
+        }
+      }
+    } catch (err) {
+      console.warn('Error checking pending purchases:', err);
+    }
+  };
+
+  // Finalize purchase and unlock premium
+  const finalizePurchase = async (purchase) => {
+    try {
+      // Verify purchase with your server here if needed
+      console.log('Finalizing purchase:', purchase);
+      
+      // Unlock premium features
       setIsPremium(true);
       await AsyncStorage.setItem('isPremium', JSON.stringify(true));
-      setShowUpgradeModal(false);
-      Alert.alert('Success!', 'Welcome to Sur Studio Premium! All features unlocked.');
+      await AsyncStorage.setItem('purchaseToken', purchase.purchaseToken || purchase.transactionReceipt);
+      
+      // Finish the purchase on the platform
+      await RNIap.finishTransaction(purchase, false);
+      
+      console.log('Purchase finalized successfully');
+      return true;
     } catch (error) {
-      Alert.alert('Error', 'Purchase failed. Please try again.');
+      console.error('Error finalizing purchase:', error);
+      return false;
+    }
+  };
+
+  // Handle purchase process
+  const purchasePremium = async () => {
+    if (isProcessingPurchase) return;
+    
+    setIsProcessingPurchase(true);
+    setPurchaseError(null);
+    
+    try {
+      // Check if we have the product available
+      const premiumProduct = products.find(p => p.productId === PREMIUM_PRODUCT_ID);
+      if (!premiumProduct && !__DEV__) {
+        throw new Error('Premium product not available');
+      }
+      
+      // In development mode, simulate purchase
+      if (__DEV__ && !premiumProduct) {
+        console.log('Development mode: Simulating purchase');
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate processing time
+        setIsPremium(true);
+        await AsyncStorage.setItem('isPremium', JSON.stringify(true));
+        setShowUpgradeModal(false);
+        Alert.alert('Success!', 'Welcome to Swara Sadhana Premium! All features unlocked.');
+        return;
+      }
+      
+      // Request purchase
+      const purchase = await RNIap.requestPurchase({
+        sku: PREMIUM_PRODUCT_ID,
+        andDangerouslyFinishTransactionAutomaticallyIOS: false,
+      });
+      
+      console.log('Purchase successful:', purchase);
+      
+      // Finalize the purchase
+      const success = await finalizePurchase(purchase);
+      
+      if (success) {
+        setShowUpgradeModal(false);
+        Alert.alert('Success!', 'Welcome to Swara Sadhana Premium! All features unlocked.');
+      } else {
+        throw new Error('Failed to finalize purchase');
+      }
+      
+    } catch (err) {
+      console.error('Purchase error:', err);
+      
+      let errorMessage = 'Purchase failed. Please try again.';
+      
+      if (err.code === 'E_USER_CANCELLED') {
+        errorMessage = 'Purchase cancelled by user.';
+      } else if (err.code === 'E_PAYMENT_INVALID') {
+        errorMessage = 'Invalid payment method. Please check your payment settings.';
+      } else if (err.code === 'E_NETWORK_ERROR') {
+        errorMessage = 'Network error. Please check your internet connection.';
+      }
+      
+      setPurchaseError(errorMessage);
+      
+      if (err.code !== 'E_USER_CANCELLED') {
+        Alert.alert('Purchase Error', errorMessage);
+      }
+    } finally {
+      setIsProcessingPurchase(false);
+    }
+  };
+
+  // Restore purchases (for iOS mainly)
+  const restorePurchases = async () => {
+    try {
+      setIsProcessingPurchase(true);
+      const purchases = await RNIap.getAvailablePurchases();
+      
+      let premiumFound = false;
+      for (const purchase of purchases) {
+        if (purchase.productId === PREMIUM_PRODUCT_ID) {
+          await finalizePurchase(purchase);
+          premiumFound = true;
+          break;
+        }
+      }
+      
+      if (premiumFound) {
+        setShowUpgradeModal(false);
+        Alert.alert('Success!', 'Premium features have been restored!');
+      } else {
+        Alert.alert('No Purchases', 'No previous premium purchases found.');
+      }
+      
+    } catch (err) {
+      console.error('Restore purchases error:', err);
+      Alert.alert('Error', 'Failed to restore purchases. Please try again.');
+    } finally {
+      setIsProcessingPurchase(false);
+    }
+  };
+
+  const upgradeToPremium = async () => {
+    await purchasePremium();
+  };
+
+  // Debug functions for testing (development only)
+  const togglePremiumForTesting = async () => {
+    if (!__DEV__) return;
+    
+    try {
+      const newPremiumStatus = !isPremium;
+      setIsPremium(newPremiumStatus);
+      await AsyncStorage.setItem('isPremium', JSON.stringify(newPremiumStatus));
+      Alert.alert(
+        'Debug Mode', 
+        `Premium status changed to: ${newPremiumStatus ? 'PREMIUM' : 'FREE'}`,
+        [{ text: 'OK' }]
+      );
+    } catch (error) {
+      console.error('Error toggling premium status:', error);
+    }
+  };
+
+  const resetAllData = async () => {
+    if (!__DEV__) return;
+    
+    try {
+      await AsyncStorage.multiRemove([
+        'isPremium',
+        'userLevel', 
+        'userXP',
+        'completedRaags',
+        'userSaFrequency',
+        'selectedPianoKey',
+        'purchaseToken'
+      ]);
+      
+      // Reset state
+      setIsPremium(false);
+      setUserLevel(1);
+      setUserXP(0);
+      setCompletedRaags([]);
+      setSaFrequency(null);
+      setSelectedPianoKey(null);
+      setGameState('saDetection');
+      
+      Alert.alert('Debug Mode', 'All user data has been reset!');
+    } catch (error) {
+      console.error('Error resetting data:', error);
     }
   };
   
@@ -139,6 +353,14 @@ const RiyaazScreen = () => {
     loadUserProgress();
     loadCompletedRaags();
     loadPremiumStatus();
+    initializeIAP();
+  }, []);
+
+  // Cleanup IAP connection on unmount
+  useEffect(() => {
+    return () => {
+      RNIap.endConnection();
+    };
   }, []);
 
   // Search functionality for raags
@@ -185,7 +407,10 @@ const RiyaazScreen = () => {
   // Pitch monitoring for game play
   useEffect(() => {
     if (gameState === 'playing' && currentPitch?.frequency && saFrequency) {
-      const targetFrequency = getSwaraFrequency(swaraSequence[currentSwaraIndex]);
+      const targetFrequency = getSwaraFrequency(swaraSequence[currentSwaraIndex], {
+        sequence: swaraSequence,
+        position: currentSwaraIndex
+      });
       const deviation = getPitchDeviation(currentPitch.frequency, targetFrequency);
       // Calculate accuracy based on dynamic tolerance
       const accuracy = Math.max(0, 100 - (Math.abs(deviation || 100) * 100 / tolerance));
@@ -295,7 +520,7 @@ const RiyaazScreen = () => {
   };
 
   // Game logic functions
-  const getSwaraFrequency = (swaraName) => {
+  const getSwaraFrequency = (swaraName, context = {}) => {
     // Handle Indian classical notation (S, R, r, G, g, M, m, P, D, d, N, n)
     const noteOffsets = {
       // Shuddha swaras (Natural)
@@ -314,7 +539,7 @@ const RiyaazScreen = () => {
       'd': 8,    // Komal Dha - Minor 6th
       'n': 10,   // Komal Ni - Minor 7th
       
-      // Octave variants
+      // Explicit octave variants
       'S\'': 12, // Upper Sa
       '\'N': -1, // Lower Ni
       '\'D': -3, // Lower Dha
@@ -329,13 +554,28 @@ const RiyaazScreen = () => {
     let processedSwara = swaraName.trim();
     let semitoneOffset = noteOffsets[processedSwara];
     
-    // If not found, try without apostrophes for basic notes
+    // If not found, check for explicit octave marking
     if (semitoneOffset === undefined) {
       const cleanSwara = processedSwara.replace(/'/g, '');
-      semitoneOffset = noteOffsets[cleanSwara] || 0;
+      semitoneOffset = noteOffsets[cleanSwara];
+      
+      // Apply contextual octave logic for ambiguous cases
+      if (semitoneOffset !== undefined && context.sequence && context.position !== undefined) {
+        semitoneOffset = applyContextualOctave(cleanSwara, semitoneOffset, context);
+      }
+    }
+    
+    // Default to 0 if still not found
+    if (semitoneOffset === undefined) {
+      semitoneOffset = 0;
     }
     
     return saFrequency * Math.pow(2, semitoneOffset / 12);
+  };
+
+  // Helper function to apply contextual octave logic
+  const applyContextualOctave = (swara, baseOffset, context) => {
+    return baseOffset; // No contextual adjustment - rely on notation
   };
 
   const getPitchDeviation = (currentFreq, targetFreq) => {
@@ -538,7 +778,6 @@ const RiyaazScreen = () => {
       // Set the raag and initialize
       setSelectedRaag(raagName);
       setCurrentRaagSequence('arohi');
-      setRaagProgress({ arohi: false, avrohi: false, pakad: false });
       
       // Update sequence from raag with loading state
       updateSequenceFromRaag(raagName, 'arohi', selectedRaagData);
@@ -580,52 +819,17 @@ const RiyaazScreen = () => {
   };
 
   const completeRaagSequence = async () => {
-    const newProgress = { ...raagProgress };
-    newProgress[currentRaagSequence] = true;
-    setRaagProgress(newProgress);
-
-    // Check if all sequences are completed
-    if (newProgress.arohi && newProgress.avrohi && newProgress.pakad) {
-      // Raag completed silently!
-      const newCompletedRaags = [...completedRaags, selectedRaag];
-      setCompletedRaags(newCompletedRaags);
-      saveCompletedRaags(newCompletedRaags);
-      
-      // Stop the current practice and return to setup
-      setGameState('setup');
-      if (isRecording) {
-        stopRecording();
-      }
-      stopSwaraTone();
-      return;
-    }
-
-    // Move to next sequence automatically
-    const sequences = ['arohi', 'avrohi', 'pakad'];
-    const currentIndex = sequences.indexOf(currentRaagSequence);
-    const nextSequence = sequences[currentIndex + 1];
+    // Raag sequence completed! Mark as completed and return to setup
+    const newCompletedRaags = [...completedRaags, selectedRaag];
+    setCompletedRaags(newCompletedRaags);
+    saveCompletedRaags(newCompletedRaags);
     
-    if (nextSequence) {
-      // Reset game state before switching sequence
-      setCurrentSwaraIndex(0);
-      setCurrentHoldTime(0);
-      progressValue.setValue(0);
-      
-      // Clear any running timers
-      if (holdTimerRef.current) {
-        clearInterval(holdTimerRef.current);
-        holdTimerRef.current = null;
-      }
-      
-      setCurrentRaagSequence(nextSequence);
-      // Make sure we have the raag data before updating sequence
-      const selectedRaagData = await loadRaagData(selectedRaag);
-      if (selectedRaagData) {
-        updateSequenceFromRaag(selectedRaag, nextSequence, selectedRaagData);
-        // Automatically start the next sequence
-        setGameState('playing');
-      }
+    // Stop the current practice and return to setup
+    setGameState('setup');
+    if (isRecording) {
+      stopRecording();
     }
+    stopSwaraTone();
   };
 
   const saveCompletedRaags = async (completedRaagsList) => {
@@ -892,7 +1096,10 @@ const RiyaazScreen = () => {
     if (gameState === 'playing' && saFrequency && swaraSequence.length > 0) {
       try {
         const currentSwara = swaraSequence[currentSwaraIndex];
-        const targetFrequency = getSwaraFrequency(currentSwara);
+        const targetFrequency = getSwaraFrequency(currentSwara, {
+          sequence: swaraSequence,
+          position: currentSwaraIndex
+        });
         
         // Play tanpura-style tone for 2.0 seconds
         await playSwaraTone(targetFrequency, 2.0);
@@ -955,7 +1162,7 @@ const RiyaazScreen = () => {
   const renderHeader = () => (
     <View style={styles.header}>
       <View style={styles.headerLeft}>
-        <Text style={styles.appTitle}>Sur Studio</Text>
+        <Text style={styles.appTitle}>Swara Sadhana</Text>
         <Text style={styles.appSubtitle}>Master Your Voice</Text>
       </View>
       
@@ -1232,8 +1439,8 @@ const RiyaazScreen = () => {
     if (!practiceMode) {
       return (
         <View style={styles.setupContainer}>
-          <Text style={styles.setupTitle}>Sur Studio</Text>
-          <Text style={styles.setupSubtitle}>Choose Your Practice Mode</Text>
+          <Text style={styles.setupTitle}>Swara Sadhana</Text>
+          <Text style={styles.setupSubtitle}>Master the Art of Indian Classical Music</Text>
           
           <View style={styles.practiceModesContainer}>
             {/* Free-form Practice */}
@@ -1241,10 +1448,11 @@ const RiyaazScreen = () => {
               style={styles.practiceModeCard}
               onPress={() => setPracticeMode('freeform')}
             >
-              <Text style={styles.practiceModeIcon}>�</Text>
-              <Text style={styles.practiceModeTitle}>Free Practice</Text>
+              <Text style={styles.practiceModeIcon}>🎶</Text>
+              <Text style={styles.practiceModeTitle}>Swara Practice</Text>
               <Text style={styles.practiceModeDescription}>
-                Practice individual swaras at your own pace
+                Perfect your intonation with focused practice on individual swaras. 
+                Build the foundation of classical singing with real-time feedback.
               </Text>
             </TouchableOpacity>
 
@@ -1263,12 +1471,38 @@ const RiyaazScreen = () => {
               }}
             >
               <View style={styles.cardHeader}>
-                <Text style={styles.practiceModeIcon}>�</Text>
+                <Text style={styles.practiceModeIcon}>🎵</Text>
                 {!isPremium && <Text style={styles.premiumBadge}>✨ Premium</Text>}
               </View>
-              <Text style={styles.practiceModeTitle}>Raag Practice</Text>
+              <Text style={styles.practiceModeTitle}>Raag Mastery</Text>
               <Text style={styles.practiceModeDescription}>
-                Master classical raags with guided sequences
+                Journey through the melodic structures of Indian classical raags. 
+                Learn arohi, avrohi, and pakad patterns with 100+ authentic raags.
+              </Text>
+            </TouchableOpacity>
+
+            {/* Raag Sadhana - Gamified Learning */}
+            <TouchableOpacity
+              style={[
+                styles.practiceModeCard,
+                !isPremium && styles.premiumCard
+              ]}
+              onPress={() => {
+                if (isPremium) {
+                  setPracticeMode('raagSadhana');
+                } else {
+                  setShowUpgradeModal(true);
+                }
+              }}
+            >
+              <View style={styles.cardHeader}>
+                <Text style={styles.practiceModeIcon}>🏆</Text>
+                {!isPremium && <Text style={styles.premiumBadge}>✨ Premium</Text>}
+              </View>
+              <Text style={styles.practiceModeTitle}>Raag Sadhana</Text>
+              <Text style={styles.practiceModeDescription}>
+                Gamified raag mastery system. Progress through levels - vadi, samvadi, arohi, avrohi, and pakad. 
+                Score points, master each element, and become a raag expert!
               </Text>
             </TouchableOpacity>
           </View>
@@ -1289,7 +1523,8 @@ const RiyaazScreen = () => {
               <Text style={styles.backArrowText}>←</Text>
             </TouchableOpacity> 
             <Text style={styles.widgetTitle}>
-               {practiceMode === 'raag' ? 'Raag Practice' : 'Free Practice'}
+               {practiceMode === 'raag' ? 'Raag Practice' : 
+                practiceMode === 'raagSadhana' ? 'Raag Sadhana' : 'Swara Practice'}
               </Text>
           </View>
           
@@ -1335,8 +1570,7 @@ const RiyaazScreen = () => {
               {selectedRaag && !isLoadingRaag && (
                 <View style={styles.raagProgressContainer}>
                   <Text style={styles.raagProgressText}>
-                    {currentRaagSequence.toUpperCase()} • 
-                    Progress: {Object.values(raagProgress).filter(Boolean).length}/3
+                    {currentRaagSequence.toUpperCase()}
                   </Text>
                   {completedRaags.includes(selectedRaag) && (
                     <Text style={styles.completedBadge}>✅ MASTERED</Text>
@@ -1478,7 +1712,10 @@ const RiyaazScreen = () => {
     >
       <View style={styles.modalContainer}>
         <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>🎵 Select Raag</Text>
+          <View style={styles.modalHeaderContent}>
+            <Text style={styles.modalTitle}>� Raag Library</Text>
+            <Text style={styles.modalSubtitle}>Choose from classical Indian raags</Text>
+          </View>
           <TouchableOpacity
             style={styles.closeButton}
             onPress={() => {
@@ -1490,51 +1727,93 @@ const RiyaazScreen = () => {
           </TouchableOpacity>
         </View>
         
-        {/* Search Input */}
-        <View style={styles.searchContainer}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search raags..."
-            placeholderTextColor="#888"
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            autoCorrect={false}
-            autoCapitalize="none"
-          />
-          <Text style={styles.searchIcon}>🔍</Text>
+        {/* Search Section */}
+        <View style={styles.searchSection}>
+          <View style={styles.searchContainer}>
+            <Text style={styles.searchIcon}>🔍</Text>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search raags by name..."
+              placeholderTextColor="#888"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity 
+                style={styles.clearSearchButton}
+                onPress={() => setSearchQuery('')}
+              >
+                <Text style={styles.clearSearchText}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          
+          {/* Results Info */}
+          <View style={styles.resultsSection}>
+            <Text style={styles.resultsText}>
+              {filteredRaags.length} of {raagNames.length} raags
+            </Text>
+            <Text style={styles.completedCount}>
+              {completedRaags.length} mastered
+            </Text>
+          </View>
         </View>
         
-        {/* Results count */}
-        <View style={styles.resultsContainer}>
-          <Text style={styles.resultsText}>
-            {filteredRaags.length} raags found
-          </Text>
-        </View>
-        
-        <ScrollView style={styles.raagList} keyboardShouldPersistTaps="handled">
-          {filteredRaags.map((raagName) => (
-            <TouchableOpacity
-              key={raagName}
-              style={[
-                styles.raagItem,
-                completedRaags.includes(raagName) && styles.completedRaagItem
-              ]}
-              onPress={() => selectRaag(raagName)}
-            >
-              <View style={styles.raagItemContent}>
-                <Text style={styles.raagName}>
-                  {completedRaags.includes(raagName) ? '✅ ' : '📜 '}
-                  {raagName}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          ))}
+        <ScrollView 
+          style={styles.raagList} 
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={true}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={20}
+          updateCellsBatchingPeriod={50}
+          initialNumToRender={15}
+        >
+          {filteredRaags.map((raagName) => {
+            const isCompleted = completedRaags.includes(raagName);
+            
+            return (
+              <TouchableOpacity
+                key={raagName}
+                style={[
+                  styles.simpleRaagItem,
+                  isCompleted && styles.completedRaagItem
+                ]}
+                onPress={() => selectRaag(raagName)}
+              >
+                <View style={styles.raagItemContent}>
+                  <Text style={styles.raagIcon}>
+                    {isCompleted ? '✅' : '🎼'}
+                  </Text>
+                  <Text style={[
+                    styles.raagName,
+                    isCompleted && styles.completedRaagName
+                  ]}>
+                    {raagName}
+                  </Text>
+                  {isCompleted && (
+                    <Text style={styles.masteredText}>MASTERED</Text>
+                  )}
+                </View>
+                <Text style={styles.selectArrow}>→</Text>
+              </TouchableOpacity>
+            );
+          })}
+          
           {filteredRaags.length === 0 && (
             <View style={styles.noResultsContainer}>
+              <Text style={styles.noResultsIcon}>🔍</Text>
               <Text style={styles.noResultsText}>No raags found</Text>
               <Text style={styles.noResultsSubtext}>
-                Try a different search term
+                Try searching with different keywords or check spelling
               </Text>
+              <TouchableOpacity 
+                style={styles.clearFiltersButton}
+                onPress={() => setSearchQuery('')}
+              >
+                <Text style={styles.clearFiltersText}>Clear Search</Text>
+              </TouchableOpacity>
             </View>
           )}
         </ScrollView>
@@ -1543,54 +1822,94 @@ const RiyaazScreen = () => {
   );
 
   // Upgrade Modal
-  const renderUpgradeModal = () => (
-    <Modal
-      visible={showUpgradeModal}
-      animationType="slide"
-      transparent={true}
-      onRequestClose={() => setShowUpgradeModal(false)}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.upgradeModal}>
-          <Text style={styles.upgradeTitle}>✨ Upgrade to Premium</Text>
-          <Text style={styles.upgradeSubtitle}>Unlock all features and content</Text>
-          
-          <View style={styles.featuresList}>
-            <View style={styles.featureItem}>
-              <Text style={styles.featureIcon}>🎼</Text>
-              <Text style={styles.featureText}>Access all 100+ classical raags</Text>
+  const renderUpgradeModal = () => {
+    const premiumProduct = products.find(p => p.productId === PREMIUM_PRODUCT_ID);
+    const price = premiumProduct ? premiumProduct.localizedPrice : '$4.99';
+    
+    return (
+      <Modal
+        visible={showUpgradeModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowUpgradeModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.upgradeModal}>
+            <Text style={styles.upgradeTitle}>✨ Upgrade to Premium</Text>
+            <Text style={styles.upgradeSubtitle}>Unlock all features and content</Text>
+            
+            <View style={styles.featuresList}>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>🎼</Text>
+                <Text style={styles.featureText}>Access all 220+ classical raags</Text>
+              </View>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>🎵</Text>
+                <Text style={styles.featureText}>Practice all 12 swaras in free mode</Text>
+              </View>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>🔄</Text>
+                <Text style={styles.featureText}>Unlimited practice sessions</Text>
+              </View>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>📱</Text>
+                <Text style={styles.featureText}>Ad-free experience</Text>
+              </View>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>🎯</Text>
+                <Text style={styles.featureText}>Advanced pitch tracking</Text>
+              </View>
+              <View style={styles.featureItem}>
+                <Text style={styles.featureIcon}>📊</Text>
+                <Text style={styles.featureText}>Detailed progress analytics</Text>
+              </View>
             </View>
-            <View style={styles.featureItem}>
-              <Text style={styles.featureIcon}>🎵</Text>
-              <Text style={styles.featureText}>Practice all 12 swaras in free mode</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Text style={styles.featureIcon}>🔄</Text>
-              <Text style={styles.featureText}>Unlimited practice sessions</Text>
-            </View>
-            <View style={styles.featureItem}>
-              <Text style={styles.featureIcon}>📱</Text>
-              <Text style={styles.featureText}>Ad-free experience</Text>
-            </View>
+
+            {purchaseError && (
+              <Text style={styles.purchaseError}>{purchaseError}</Text>
+            )}
+
+            <TouchableOpacity
+              style={[styles.upgradeButton, isProcessingPurchase && styles.upgradeButtonDisabled]}
+              onPress={upgradeToPremium}
+              disabled={isProcessingPurchase}
+            >
+              {isProcessingPurchase ? (
+                <View style={styles.processingContainer}>
+                  <ActivityIndicator size="small" color="#fff" />
+                  <Text style={styles.upgradeButtonText}>Processing...</Text>
+                </View>
+              ) : (
+                <Text style={styles.upgradeButtonText}>Upgrade Now - {price}</Text>
+              )}
+            </TouchableOpacity>
+
+            {Platform.OS === 'ios' && (
+              <TouchableOpacity
+                style={styles.restoreButton}
+                onPress={restorePurchases}
+                disabled={isProcessingPurchase}
+              >
+                <Text style={styles.restoreButtonText}>Restore Purchases</Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.cancelUpgradeButton}
+              onPress={() => setShowUpgradeModal(false)}
+              disabled={isProcessingPurchase}
+            >
+              <Text style={styles.cancelUpgradeText}>Maybe Later</Text>
+            </TouchableOpacity>
+            
+            <Text style={styles.legalText}>
+              One-time purchase. No subscriptions. Full access forever.
+            </Text>
           </View>
-
-          <TouchableOpacity
-            style={styles.upgradeButton}
-            onPress={upgradeToPremium}
-          >
-            <Text style={styles.upgradeButtonText}>Upgrade Now - $4.99</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.cancelUpgradeButton}
-            onPress={() => setShowUpgradeModal(false)}
-          >
-            <Text style={styles.cancelUpgradeText}>Maybe Later</Text>
-          </TouchableOpacity>
         </View>
-      </View>
-    </Modal>
-  );
+      </Modal>
+    );
+  };
 
   // Settings Modal
   const renderSettingsModal = () => (
@@ -1715,6 +2034,61 @@ const RiyaazScreen = () => {
               <Text style={styles.resetSaButtonText}>🎯 Reset Sa</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Debug Section - Only in Development */}
+          {__DEV__ && (
+            <View style={styles.settingItem}>
+              <Text style={styles.settingLabel}>🔧 Debug Controls</Text>
+              <Text style={styles.settingDescription}>
+                Development testing tools
+              </Text>
+              
+              <View style={styles.debugControls}>
+                <TouchableOpacity
+                  style={[
+                    styles.debugButton,
+                    { backgroundColor: isPremium ? '#4CAF50' : '#F44336' }
+                  ]}
+                  onPress={togglePremiumForTesting}
+                >
+                  <Text style={styles.debugButtonText}>
+                    {isPremium ? '⭐ PREMIUM' : '💎 FREE'}
+                  </Text>
+                  <Text style={styles.debugButtonSubtext}>
+                    Tap to toggle
+                  </Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  style={styles.debugButton}
+                  onPress={resetAllData}
+                >
+                  <Text style={styles.debugButtonText}>🗑️ RESET</Text>
+                  <Text style={styles.debugButtonSubtext}>
+                    Clear all data
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              
+              <View style={styles.debugInfo}>
+                <Text style={styles.debugInfoText}>
+                  Premium: {isPremium ? '✅ Active' : '❌ Inactive'}
+                </Text>
+                <Text style={styles.debugInfoText}>
+                  Level: {userLevel} | XP: {userXP}
+                </Text>
+                <Text style={styles.debugInfoText}>
+                  Raags Completed: {completedRaags.length}
+                </Text>
+                <Text style={styles.debugInfoText}>
+                  Sa Frequency: {saFrequency ? `${Math.round(saFrequency)}Hz` : 'Not Set'}
+                </Text>
+                <Text style={styles.debugInfoText}>
+                  Products: {products.length} | Processing: {isProcessingPurchase ? 'Yes' : 'No'}
+                </Text>
+              </View>
+            </View>
+          )}
         </ScrollView>
       </View>
     </Modal>
@@ -1756,8 +2130,19 @@ const RiyaazScreen = () => {
     
     return (
       <View style={styles.gameContainer}>
-        {/* Live Pitch Display */}
-        <View style={styles.livePitchDisplay}>
+       
+
+        {/* Combined Training Analytics Widget */}
+        <View style={styles.trainingAnalyticsWidget}>
+           <View style={styles.widgetHeader}>
+            <TouchableOpacity 
+              style={styles.backArrow}
+              onPress={resetGame}
+            >
+              <Text style={styles.backArrowText}>←</Text>
+            </TouchableOpacity>
+            <Text style={styles.widgetTitle}>Practice Analytics</Text>
+          </View>
           <View style={styles.pitchInfo}>
             <Text style={styles.pitchLabel}>Your Pitch:</Text>
             <Text style={styles.pitchValue}>
@@ -1785,32 +2170,8 @@ const RiyaazScreen = () => {
               {Math.round((currentPitch?.confidence || 0) * 100)}%
             </Text>
           </View>
-          {/* Debug info for development */}
-          {__DEV__ && saFrequency && currentPitch?.frequency && (
-            <View style={styles.debugPitchInfo}>
-              <Text style={styles.debugText}>
-                Sa: {Math.round(saFrequency)}Hz • 
-                Ratio: {(currentPitch.frequency / saFrequency).toFixed(2)} • 
-                Cents: {Math.round(1200 * Math.log2(currentPitch.frequency / saFrequency))}
-              </Text>
-              <Text style={styles.debugText}>
-                Target: {swaraSequence[currentSwaraIndex]} ({Math.round(getSwaraFrequency(swaraSequence[currentSwaraIndex]))}Hz)
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* Combined Training Analytics Widget */}
-        <View style={styles.trainingAnalyticsWidget}>
-          <View style={styles.widgetHeader}>
-            <TouchableOpacity 
-              style={styles.backArrow}
-              onPress={resetGame}
-            >
-              <Text style={styles.backArrowText}>←</Text>
-            </TouchableOpacity>
-            <Text style={styles.widgetTitle}>Practice Analytics</Text>
-          </View>
+       
+         
 
            <View style={styles.swaraWheel}>
             {/* Outer ring with all 12 swaras */}
@@ -1842,7 +2203,10 @@ const RiyaazScreen = () => {
                     }
                   ]}
                   onPress={() => {
-                    const swaraFreq = getSwaraFrequency(swara);
+                    const swaraFreq = getSwaraFrequency(swara, {
+                      sequence: swaraSequence,
+                      position: swaraSequence.findIndex(s => isSameSwaraBase(s, swara))
+                    });
                     playSwaraTone(swaraFreq, 1.5);
                   }}
                   activeOpacity={0.7}
@@ -1874,7 +2238,10 @@ const RiyaazScreen = () => {
                   {currentSwara}
                 </Animated.Text>
                 <Text style={styles.targetFreq}>
-                  {Math.round(getSwaraFrequency(currentSwara))} Hz
+                  {Math.round(getSwaraFrequency(currentSwara, {
+                    sequence: swaraSequence,
+                    position: currentSwaraIndex
+                  }))} Hz
                 </Text>
               </View>
               
@@ -1953,7 +2320,13 @@ const RiyaazScreen = () => {
               <Text style={styles.metricValue}>{Math.round(pitchAccuracy)}%</Text>
               <Text style={styles.metricSubtext}>
                 {currentPitch?.frequency && saFrequency ? 
-                  `${getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara)) > 0 ? '+' : ''}${Math.round(getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara)) || 0)} cents` 
+                  `${getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara, {
+                    sequence: swaraSequence,
+                    position: currentSwaraIndex
+                  })) > 0 ? '+' : ''}${Math.round(getPitchDeviation(currentPitch.frequency, getSwaraFrequency(currentSwara, {
+                    sequence: swaraSequence,
+                    position: currentSwaraIndex
+                  })) || 0)} cents` 
                   : '-- cents'
                 }
               </Text>
@@ -1979,114 +2352,64 @@ const RiyaazScreen = () => {
               <Text style={styles.metricSubtext}>{stabilityFeedback}</Text>
             </View>
           </View>
-           {/* Progress and controls */}
-          <View style={styles.wheelControls}>
-            <View style={styles.progressInfo}>
-              <Text style={styles.progressText}>
-                {currentSwaraIndex + 1} of {swaraSequence.length}
-              </Text>
-              {selectedRaag && (
+           {/* Progress and controls - only show sequence progress in raag mode */}
+          {selectedRaag && (
+            <View style={styles.wheelControls}>
+              <View style={styles.progressInfo}>
+                <Text style={styles.progressText}>
+                  {currentSwaraIndex + 1} of {swaraSequence.length}
+                </Text>
                 <Text style={styles.raagText}>
                   {selectedRaag} • {currentRaagSequence.toUpperCase()}
                 </Text>
-              )}
+              </View>
             </View>
-          </View>
+          )}
 
-          {/* Play Button - Centered below metrics */}
-          <TouchableOpacity
-            style={styles.playTanpuraButton}
-            onPress={() => {
-              if (swaraSequence[currentSwaraIndex]) {
-                const freq = getSwaraFrequency(swaraSequence[currentSwaraIndex]);
-                console.log('Playing tanpura for:', swaraSequence[currentSwaraIndex], 'at', freq, 'Hz');
-                playSwaraTone(freq, 2.0).catch(error => {
-                  console.error('Error playing swara tone:', error);
-                });
-              }
-            }}
-          >
-            <Text style={styles.playTanpuraText}>♪ Play Reference</Text>
-          </TouchableOpacity>
-        </View>
+      
 
-        {/* Professional Swara Circle Display */}
-        <View style={styles.swaraCircleContainer}>
-         
-          
-          {/* Sequence Progress Bar */}
-          <View style={styles.sequenceProgress}>
+          {/* Sequence Progress Display - Shows notes to be played */}
+          <View style={styles.sequenceDisplay}>
             <Text style={styles.sequenceLabel}>Sequence Progress</Text>
-            <View style={styles.sequenceRow}>
+            <View style={styles.sequenceNotesContainer}>
               {swaraSequence.map((swara, index) => (
-                <View 
-                  key={index} 
+                <View
+                  key={index}
                   style={[
-                    styles.sequenceItem,
+                    styles.sequenceNoteItem,
                     {
-                      backgroundColor: index === currentSwaraIndex ? '#FF6B35' :
-                                     index < currentSwaraIndex ? '#4CAF50' : 
-                                     'rgba(255, 255, 255, 0.1)',
-                      borderColor: index === currentSwaraIndex ? '#FF8A50' :
-                                 index < currentSwaraIndex ? '#66BB6A' : 
-                                 'rgba(255, 255, 255, 0.2)',
+                      backgroundColor: index < currentSwaraIndex ? '#4CAF50' : 
+                                     index === currentSwaraIndex ? '#FF6B35' : '#FF9800'
                     }
                   ]}
                 >
                   <Text style={[
-                    styles.sequenceItemText,
+                    styles.sequenceNoteText,
                     {
-                      color: index <= currentSwaraIndex ? '#fff' : '#999',
-                      fontWeight: index === currentSwaraIndex ? 'bold' : 'normal',
+                      color: index <= currentSwaraIndex ? '#fff' : '#fff',
+                      fontWeight: index === currentSwaraIndex ? 'bold' : '600'
                     }
                   ]}>
                     {swara}
                   </Text>
+                  {index < currentSwaraIndex && (
+                    <Text style={styles.completedIndicator}>✓</Text>
+                  )}
+                  {index === currentSwaraIndex && (
+                    <Text style={styles.currentIndicator}>●</Text>
+                  )}
                 </View>
               ))}
             </View>
+            <Text style={styles.sequenceProgress}>
+              {currentSwaraIndex} of {swaraSequence.length} completed
+            </Text>
           </View>
-        </View>
-
-        {/* Tolerance Adjustment Section */}
-        <View style={styles.toleranceSection}>
-          <Text style={styles.sectionTitle}>Pitch Tolerance</Text>
-          <View style={styles.toleranceControls}>
-            <TouchableOpacity 
-              style={styles.toleranceButton} 
-              onPress={() => adjustTolerance('easier')}
-            >
-              <Text style={styles.toleranceButtonText}>←</Text>
-            </TouchableOpacity>
-            <View style={styles.toleranceInfo}>
-              <Text style={styles.toleranceLevel}>{toleranceLevel}</Text>
-              <Text style={styles.toleranceValue}>±{tolerance} cents</Text>
-            </View>
-            <TouchableOpacity 
-              style={styles.toleranceButton} 
-              onPress={() => adjustTolerance('harder')}
-            >
-              <Text style={styles.toleranceButtonText}>→</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.toleranceDescription}>
-            {tolerance >= 75 ? 'Very forgiving - great for beginners' :
-             tolerance >= 50 ? 'Balanced - good for practice' :
-             tolerance >= 35 ? 'Precise - for intermediate singers' :
-             'Expert level - perfect pitch required'}
-          </Text>
         </View>
 
         {/* Feedback */}
         <View style={styles.feedbackSection}>
-          <Text style={[
-            styles.feedbackText,
-            { 
-              color: isHoldingCorrectly ? '#4CAF50' : '#FFC107',
-            }
-          ]}>
-            {visualFeedback}
-          </Text>
+         
         </View>
       </View>
     );
@@ -2163,6 +2486,17 @@ const RiyaazScreen = () => {
   }, []);
 
   const renderContent = () => {
+    // Handle raagSadhana navigation
+    if (practiceMode === 'raagSadhana') {
+      return (
+        <RaagSadhana 
+          onBack={() => setPracticeMode(null)}
+          saFrequency={saFrequency}
+          onSetSa={() => setGameState('saDetection')}
+        />
+      );
+    }
+
     switch (gameState) {
       case 'saDetection':
         return renderSaDetection();
@@ -3150,19 +3484,66 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     textAlign: 'center',
   },
-  playTanpuraButton: {
-    backgroundColor: 'rgba(255, 107, 53, 0.2)',
+  // Sequence Display Styles
+  sequenceDisplay: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 16,
     borderWidth: 1,
-    borderColor: '#FF6B35',
-    borderRadius: 20,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
     alignItems: 'center',
   },
-  playTanpuraText: {
-    color: '#FF6B35',
+  sequenceLabel: {
     fontSize: 14,
+    color: '#FF6B35',
     fontWeight: '600',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  sequenceNotesContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  sequenceNoteItem: {
+    minWidth: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+    paddingHorizontal: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  sequenceNoteText: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginRight: 2,
+  },
+  completedIndicator: {
+    fontSize: 12,
+    color: '#fff',
+    fontWeight: 'bold',
+    marginLeft: 2,
+  },
+  currentIndicator: {
+    fontSize: 8,
+    color: '#fff',
+    fontWeight: 'bold',
+    marginLeft: 2,
+  },
+  sequenceProgress: {
+    fontSize: 12,
+    color: '#aaa',
+    fontWeight: '500',
+    textAlign: 'center',
   },
   
   // Professional Swara Dial
@@ -3459,42 +3840,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   
-  // Sequence Progress
-  sequenceProgress: {
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-    width: '100%',
-  },
-  sequenceLabel: {
-    fontSize: 12,
-    color: '#aaa',
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  sequenceRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sequenceItem: {
-    minWidth: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginHorizontal: 2,
-    marginVertical: 2,
-    borderWidth: 1,
-    paddingHorizontal: 8,
-  },
-  sequenceItemText: {
-    fontSize: 11,
-    textAlign: 'center',
-  },
-  
   // Feedback Section
   feedbackSection: {
     alignItems: 'center',
@@ -3729,19 +4074,21 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
   setupTitle: {
-    fontSize: 32,
-    fontWeight: '700',
+    fontSize: 42,
+    fontWeight: '800',
     color: '#FF6B35',
     textAlign: 'center',
-    marginBottom: 15,
-    marginTop:0,
+    marginBottom: 8,
+    marginTop: 0,
+    letterSpacing: 1,
   },
   setupSubtitle: {
-    fontSize: 16,
-    color: '#ccc',
+    fontSize: 18,
+    color: '#E0E0E0',
     textAlign: 'center',
     marginBottom: 30,
-    fontWeight: '500',
+    fontWeight: '300',
+    fontStyle: 'italic',
   },
   setupHeader: {
     flexDirection: 'row',
@@ -3761,6 +4108,208 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
+  },
+
+  // Professional App Header Styles
+  appHeaderSection: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  appMainTitle: {
+    fontSize: 42,
+    fontWeight: '800',
+    color: '#FF6B35',
+    textAlign: 'center',
+    marginBottom: 8,
+    letterSpacing: 1,
+  },
+  appTagline: {
+    fontSize: 18,
+    color: '#E0E0E0',
+    textAlign: 'center',
+    marginBottom: 20,
+    fontWeight: '300',
+    fontStyle: 'italic',
+  },
+  appDescriptionCard: {
+    backgroundColor: 'rgba(255, 107, 53, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.2)',
+  },
+  appDescription: {
+    fontSize: 14,
+    color: '#C0C0C0',
+    textAlign: 'center',
+    lineHeight: 20,
+    fontWeight: '400',
+  },
+
+  // Practice Mode Section Styles
+  practiceModesSection: {
+    paddingHorizontal: 20,
+    marginBottom: 30,
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#FFF',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+
+  // Professional Practice Mode Cards
+  practiceModeProfessionalCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 20,
+    padding: 0,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  premiumModeCard: {
+    borderColor: 'rgba(255, 215, 0, 0.3)',
+    backgroundColor: 'rgba(255, 215, 0, 0.05)',
+  },
+  lockedModeCard: {
+    opacity: 0.8,
+  },
+  cardIconContainer: {
+    width: 80,
+    height: 80,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 107, 53, 0.15)',
+    marginRight: 16,
+    position: 'relative',
+  },
+  cardIcon: {
+    fontSize: 32,
+  },
+  premiumBadgeOverlay: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: '#FFD700',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  premiumBadgeText: {
+    fontSize: 12,
+    color: '#000',
+  },
+  cardContent: {
+    flex: 1,
+    paddingVertical: 16,
+    paddingRight: 16,
+  },
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFF',
+    marginBottom: 4,
+  },
+  premiumLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#FFD700',
+    backgroundColor: 'rgba(255, 215, 0, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  cardSubtitle: {
+    fontSize: 12,
+    color: '#FF6B35',
+    fontWeight: '600',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  cardDescription: {
+    fontSize: 14,
+    color: '#C0C0C0',
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  cardFeatures: {
+    marginTop: 8,
+  },
+  featureBullet: {
+    fontSize: 12,
+    color: '#A0A0A0',
+    marginBottom: 2,
+    lineHeight: 16,
+  },
+  cardArrow: {
+    width: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  arrowText: {
+    fontSize: 20,
+    color: '#FF6B35',
+    fontWeight: 'bold',
+  },
+  disabledArrow: {
+    color: '#666',
+  },
+
+  // User Progress Section
+  progressSection: {
+    paddingHorizontal: 20,
+    marginBottom: 20,
+  },
+  progressCard: {
+    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(76, 175, 80, 0.3)',
+  },
+  progressInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#4CAF50',
+  },
+  progressSubtext: {
+    fontSize: 12,
+    color: '#A0A0A0',
+  },
+  progressBarContainer: {
+    height: 6,
+    backgroundColor: 'rgba(76, 175, 80, 0.2)',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#4CAF50',
+    borderRadius: 3,
   },
   practiceModeCard: {
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
@@ -4226,6 +4775,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    marginBottom: 8,
   },
   confidenceLabel: {
     fontSize: 12,
@@ -4640,141 +5190,206 @@ const styles = StyleSheet.create({
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     paddingHorizontal: 20,
     paddingBottom: 20,
-    borderBottomWidth: 1,
+    borderBottomWidth: 2,
     borderBottomColor: '#333',
   },
+  modalHeaderContent: {
+    flex: 1,
+  },
   modalTitle: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 28,
+    fontWeight: '800',
     color: '#FF6B35',
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    fontSize: 16,
+    color: '#aaa',
+    fontWeight: '400',
   },
   closeButton: {
-    backgroundColor: '#333',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 4,
   },
   closeButtonText: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 20,
+    fontWeight: '300',
   },
-  raagList: {
-    flex: 1,
+  // Enhanced Search Section
+  searchSection: {
     paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
   },
-  raagItem: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    padding: 15,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  completedRaagItem: {
-    backgroundColor: 'rgba(76, 175, 80, 0.1)',
-    borderColor: '#4CAF50',
-  },
-  raagItemContent: {
-    flex: 1,
-  },
-  raagName: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-    marginBottom: 8,
-  },
-  raagDetails: {
-    marginBottom: 5,
-  },
-  raagDetail: {
-    fontSize: 14,
-    color: '#ccc',
-  },
-  sequencePreview: {
-    fontSize: 12,
-    color: '#aaa',
-    fontStyle: 'italic',
-  },
-  raagPreview: {
-    fontSize: 12,
-    color: '#aaa',
-    fontStyle: 'italic',
-    marginTop: 4,
-  },
-  // Sequence label styles
-  sequenceLabelContainer: {
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 4,
-  },
-  sequenceLabel: {
-    fontSize: 14,
-    color: '#FF6B35',
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  sequenceProgressDots: {
-    flexDirection: 'row',
-    gap: 6,
-  },
-  sequenceDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#666',
-  },
-  // Search styles
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    marginHorizontal: 20,
-    marginVertical: 10,
-    paddingHorizontal: 15,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 16,
+    paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  searchIcon: {
+    fontSize: 18,
+    color: '#888',
+    marginRight: 12,
   },
   searchInput: {
     flex: 1,
     fontSize: 16,
     color: '#fff',
-    paddingVertical: 12,
+    paddingVertical: 14,
+    fontWeight: '400',
   },
-  searchIcon: {
+  clearSearchButton: {
+    padding: 4,
+    marginLeft: 8,
+  },
+  clearSearchText: {
+    color: '#888',
     fontSize: 16,
-    marginLeft: 10,
   },
-  resultsContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 10,
+  resultsSection: {
+    marginTop: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   resultsText: {
     fontSize: 14,
     color: '#aaa',
-    textAlign: 'center',
+    fontWeight: '500',
   },
+  completedCount: {
+    fontSize: 12,
+    color: '#4CAF50',
+    fontWeight: '600',
+  },
+  progressBar: {
+    width: 60,
+    height: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 2,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#4CAF50',
+    borderRadius: 2,
+  },
+  raagList: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+  },
+  // Simple Raag Items
+  simpleRaagItem: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  raagItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  raagIcon: {
+    fontSize: 20,
+    marginRight: 12,
+  },
+  raagName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+    flex: 1,
+  },
+  completedRaagName: {
+    color: '#4CAF50',
+  },
+  masteredText: {
+    fontSize: 11,
+    color: '#4CAF50',
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  selectArrow: {
+    fontSize: 16,
+    color: '#888',
+    marginLeft: 12,
+  },
+  completedRaagItem: {
+    backgroundColor: 'rgba(76, 175, 80, 0.08)',
+    borderColor: 'rgba(76, 175, 80, 0.3)',
+  },
+  
+  // Enhanced No Results and Footer
   noResultsContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 60,
+  },
+  noResultsIcon: {
+    fontSize: 48,
+    marginBottom: 16,
   },
   noResultsText: {
-    fontSize: 18,
+    fontSize: 20,
     color: '#fff',
     fontWeight: '600',
     marginBottom: 8,
   },
   noResultsSubtext: {
+    fontSize: 16,
+    color: '#888',
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
+  },
+  clearFiltersButton: {
+    backgroundColor: '#FF6B35',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
+  clearFiltersText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  modalFooter: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#222',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  footerTip: {
     fontSize: 14,
     color: '#aaa',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    lineHeight: 20,
   },
   
   // Premium and Upgrade Styles
@@ -5002,6 +5617,85 @@ const styles = StyleSheet.create({
   premiumIcon: {
     fontSize: 12,
     color: '#FF6B35',
+  },
+  
+  // Debug Styles (Development Only)
+  debugControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  debugButton: {
+    flex: 1,
+    backgroundColor: '#333',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginHorizontal: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  debugButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 2,
+  },
+  debugButtonSubtext: {
+    color: '#aaa',
+    fontSize: 10,
+  },
+  debugInfo: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  debugInfoText: {
+    color: '#aaa',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    lineHeight: 16,
+  },
+  
+  // Enhanced upgrade modal styles
+  processingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  purchaseError: {
+    color: '#FF6B6B',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 20,
+  },
+  upgradeButtonDisabled: {
+    opacity: 0.6,
+  },
+  restoreButton: {
+    backgroundColor: 'transparent',
+    paddingVertical: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    borderRadius: 25,
+  },
+  restoreButtonText: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 16,
+    textAlign: 'center',
+    fontWeight: '500',
+  },
+  legalText: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 10,
+    lineHeight: 16,
   },
   
   // Utility styles
